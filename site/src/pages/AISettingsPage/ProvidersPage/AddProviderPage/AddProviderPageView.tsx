@@ -7,6 +7,7 @@ import { createAIProviderMutation } from "#/api/queries/aiProviders";
 import { Avatar } from "#/components/Avatar/Avatar";
 import { Button } from "#/components/Button/Button";
 import { SettingsHeaderTitle } from "#/components/SettingsHeader/SettingsHeader";
+import { indefiniteArticle } from "#/utils/text";
 import type { AddableProvider } from "../components/addableProviderTypes";
 import { ProviderForm } from "../components/ProviderForm";
 import { getProviderIcon } from "../components/ProviderIcon";
@@ -15,9 +16,6 @@ import { providerFormValuesToCreate } from "../components/providerFormApiMap";
 interface AddProviderPageViewProps {
 	provider: AddableProvider;
 }
-
-const indefiniteArticle = (word: string): string =>
-	/^[aeiou]/i.test(word) ? "an" : "a";
 
 const AddProviderPageView: React.FC<AddProviderPageViewProps> = ({
 	provider,
