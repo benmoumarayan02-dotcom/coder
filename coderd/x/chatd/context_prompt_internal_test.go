@@ -1,0 +1,383 @@
+package chatd
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+	"golang.org/x/xerrors"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
+	agentproto "github.com/coder/coder/v2/agent/proto"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbmock"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/testutil"
+)
+
+func mustMarshalContextBody(t *testing.T, msg proto.Message) json.RawMessage {
+	t.Helper()
+	raw, err := protojson.Marshal(msg)
+	require.NoError(t, err)
+	return raw
+}
+
+func instructionResource(t *testing.T, source, content string, status database.WorkspaceAgentContextResourceStatus) database.ChatContextResource {
+	t.Helper()
+	return database.ChatContextResource{
+		Source:   source,
+		BodyKind: database.WorkspaceAgentContextBodyKindInstructionFile,
+		Body:     mustMarshalContextBody(t, &agentproto.InstructionFileBody{Content: []byte(content)}),
+		Status:   status,
+	}
+}
+
+func skillResource(t *testing.T, source, name, description string, status database.WorkspaceAgentContextResourceStatus) database.ChatContextResource {
+	t.Helper()
+	return database.ChatContextResource{
+		Source:   source,
+		BodyKind: database.WorkspaceAgentContextBodyKindSkill,
+		Body: mustMarshalContextBody(t, &agentproto.SkillMetaBody{
+			Meta:        []byte("# " + name),
+			Name:        name,
+			Description: description,
+		}),
+		Status: status,
+	}
+}
+
+func TestContextResourcesToPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("InstructionFilesBuildWorkspaceContext", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, skills)
+		require.Contains(t, instruction, "<workspace-context>")
+		require.Contains(t, instruction, "Operating System: linux")
+		require.Contains(t, instruction, "Working Directory: /home/coder")
+		require.Contains(t, instruction, "Source: /home/coder/AGENTS.md")
+		require.Contains(t, instruction, "be helpful")
+		require.Contains(t, instruction, "</workspace-context>")
+	})
+
+	t.Run("SkillsBuildMeta", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		// Skill-only pins emit no instruction header.
+		require.Empty(t, instruction)
+		require.Len(t, skills, 1)
+		require.Equal(t, "deploy", skills[0].Name)
+		require.Equal(t, "Deploy the app", skills[0].Description)
+		require.Equal(t, "/home/coder/.coder/skills/deploy", skills[0].Dir)
+		// MetaFile is left empty so chattool defaults to SKILL.md.
+		require.Empty(t, skills[0].MetaFile)
+	})
+
+	t.Run("SkipsNonOKStatus", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusInvalid),
+			skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOversize),
+		}
+		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("SkipsUnknownBodyKinds", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			{
+				Source:   ".mcp.json",
+				BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig,
+				Body:     mustMarshalContextBody(t, &agentproto.MCPConfigBody{}),
+				Status:   database.WorkspaceAgentContextResourceStatusOk,
+			},
+			{
+				Source:   "playwright",
+				BodyKind: database.WorkspaceAgentContextBodyKindMcpServer,
+				Body:     mustMarshalContextBody(t, &agentproto.MCPServerBody{ServerName: "playwright"}),
+				Status:   database.WorkspaceAgentContextResourceStatusOk,
+			},
+		}
+		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("SkipsMalformedBody", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			{
+				Source:   "/home/coder/AGENTS.md",
+				BodyKind: database.WorkspaceAgentContextBodyKindInstructionFile,
+				Body:     json.RawMessage(`{not valid json`),
+				Status:   database.WorkspaceAgentContextResourceStatusOk,
+			},
+			instructionResource(t, "/home/coder/CLAUDE.md", "good content", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, skills)
+		require.NotContains(t, instruction, "/home/coder/AGENTS.md")
+		require.Contains(t, instruction, "Source: /home/coder/CLAUDE.md")
+		require.Contains(t, instruction, "good content")
+	})
+
+	t.Run("EmptyInput", func(t *testing.T) {
+		t.Parallel()
+
+		instruction, skills := contextResourcesToPrompt(nil, "linux", "/home/coder")
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("OmitsOSDirWhenAgentUnresolved", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, _ := contextResourcesToPrompt(resources, "", "")
+
+		require.Contains(t, instruction, "<workspace-context>")
+		require.Contains(t, instruction, "Source: /home/coder/AGENTS.md")
+		require.Contains(t, instruction, "be helpful")
+		require.NotContains(t, instruction, "Operating System:")
+		require.NotContains(t, instruction, "Working Directory:")
+	})
+}
+
+func TestPinnedWorkspaceContext(t *testing.T) {
+	t.Parallel()
+
+	newServer := func(t *testing.T, db database.Store, enabled bool) *Server {
+		t.Helper()
+		var experiments codersdk.Experiments
+		if enabled {
+			experiments = codersdk.Experiments{codersdk.ExperimentChatContextPin}
+		}
+		return &Server{
+			db:          db,
+			logger:      slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug),
+			experiments: experiments,
+		}
+	}
+
+	t.Run("ExperimentDisabled", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		// No ListChatContextResourcesByChatID expectation: the gate must
+		// short-circuit before touching the database.
+		server := newServer(t, db, false)
+
+		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: uuid.New()}, database.WorkspaceAgent{})
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("ListError", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chatID := uuid.New()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
+			Return(nil, xerrors.New("boom"))
+		server := newServer(t, db, true)
+
+		_, _, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, database.WorkspaceAgent{})
+		require.Error(t, err)
+		require.False(t, ok)
+	})
+
+	t.Run("NoRowsFallsBack", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chatID := uuid.New()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
+			Return([]database.ChatContextResource{}, nil)
+		server := newServer(t, db, true)
+
+		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, database.WorkspaceAgent{})
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("RowsPresent", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chatID := uuid.New()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
+			Return([]database.ChatContextResource{
+				instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
+				skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
+			}, nil)
+		server := newServer(t, db, true)
+
+		agent := database.WorkspaceAgent{OperatingSystem: "linux", ExpandedDirectory: "/home/coder"}
+		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, agent)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Contains(t, instruction, "Operating System: linux")
+		require.Contains(t, instruction, "Source: /home/coder/AGENTS.md")
+		require.Contains(t, instruction, "be helpful")
+		require.Len(t, skills, 1)
+		require.Equal(t, "deploy", skills[0].Name)
+	})
+
+	t.Run("RowsPresentUnresolvedAgent", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chatID := uuid.New()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
+			Return([]database.ChatContextResource{
+				instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
+			}, nil)
+		server := newServer(t, db, true)
+
+		// Zero-value agent: the pin still resolves, just without the
+		// OS/directory header.
+		instruction, _, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, database.WorkspaceAgent{})
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Contains(t, instruction, "Source: /home/coder/AGENTS.md")
+		require.NotContains(t, instruction, "Operating System:")
+	})
+}
+
+// TestPinnedWorkspaceContextFromHydratedPin exercises the resolver end to end
+// against a real Postgres pin: an agent's pushed context is hydrated into a
+// chat's chat_context_resources, then pinnedWorkspaceContext reads that copy.
+func TestPinnedWorkspaceContextFromHydratedPin(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	user := dbgen.User(t, db, database.User{})
+	org := dbgen.Organization(t, db, database.Organization{})
+	tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+	tmpl := dbgen.Template(t, db, database.Template{
+		OrganizationID:  org.ID,
+		ActiveVersionID: tv.ID,
+		CreatedBy:       user.ID,
+	})
+	ws := dbgen.Workspace(t, db, database.WorkspaceTable{
+		OwnerID:        user.ID,
+		OrganizationID: org.ID,
+		TemplateID:     tmpl.ID,
+	})
+	pj := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+		OrganizationID: org.ID,
+		CompletedAt:    sql.NullTime{Valid: true, Time: dbtime.Now()},
+	})
+	build := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+		WorkspaceID:       ws.ID,
+		TemplateVersionID: tv.ID,
+		JobID:             pj.ID,
+		Transition:        database.WorkspaceTransitionStart,
+	})
+	_ = build
+	res := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+		Transition: database.WorkspaceTransitionStart,
+		JobID:      pj.ID,
+	})
+	agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+		ResourceID:      res.ID,
+		OperatingSystem: "linux",
+		Directory:       "/home/coder/ws",
+	})
+	model := dbgen.ChatModelConfig(t, db, database.ChatModelConfig{})
+
+	hash := []byte{0x01, 0x02, 0x03}
+	seedAgentContext(ctx, t, db, agent.ID, "/home/coder/ws/AGENTS.md", hash,
+		database.WorkspaceAgentContextBodyKindInstructionFile,
+		mustMarshalContextBody(t, &agentproto.InstructionFileBody{Content: []byte("follow the rules")}))
+	seedAgentContext(ctx, t, db, agent.ID, "/home/coder/ws/.coder/skills/deploy", hash,
+		database.WorkspaceAgentContextBodyKindSkill,
+		mustMarshalContextBody(t, &agentproto.SkillMetaBody{
+			Meta:        []byte("# deploy"),
+			Name:        "deploy",
+			Description: "Deploy the app",
+		}))
+
+	chat := dbgen.Chat(t, db, database.Chat{
+		OwnerID:           user.ID,
+		OrganizationID:    org.ID,
+		LastModelConfigID: model.ID,
+		WorkspaceID:       uuid.NullUUID{UUID: ws.ID, Valid: true},
+		AgentID:           uuid.NullUUID{UUID: agent.ID, Valid: true},
+		Status:            database.ChatStatusWaiting,
+	})
+	require.NoError(t, db.HydrateAgentChatsContext(ctx, database.HydrateAgentChatsContextParams{
+		AgentID:       agent.ID,
+		AggregateHash: hash,
+	}))
+	rows, err := db.ListChatContextResourcesByChatID(ctx, chat.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "the pin holds the agent's instruction file and skill")
+
+	logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
+
+	serverOn := &Server{db: db, logger: logger, experiments: codersdk.Experiments{codersdk.ExperimentChatContextPin}}
+	instruction, skills, ok, err := serverOn.pinnedWorkspaceContext(ctx, chat, agent)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, instruction, "Operating System: linux")
+	require.Contains(t, instruction, "Working Directory: /home/coder/ws")
+	require.Contains(t, instruction, "Source: /home/coder/ws/AGENTS.md")
+	require.Contains(t, instruction, "follow the rules")
+	require.Len(t, skills, 1)
+	require.Equal(t, "deploy", skills[0].Name)
+	require.Equal(t, "Deploy the app", skills[0].Description)
+	require.Equal(t, "/home/coder/ws/.coder/skills/deploy", skills[0].Dir)
+
+	// With the experiment off, the hydrated pin is ignored so the caller
+	// falls back to the per-turn history path.
+	serverOff := &Server{db: db, logger: logger}
+	_, _, ok, err = serverOff.pinnedWorkspaceContext(ctx, chat, agent)
+	require.NoError(t, err)
+	require.False(t, ok)
+}

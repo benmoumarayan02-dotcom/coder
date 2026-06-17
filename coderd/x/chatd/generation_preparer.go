@@ -225,9 +225,25 @@ func (server *Server) prepareGeneration(
 		// the bound agent has changed, so this is a cheap metadata
 		// refresh, not a workspace dial. It must not insert chat
 		// history; only metadata is mutated here.
-		_, _ = workspaceCtx.getWorkspaceAgent(ctx)
-		_, found := contextFileAgentID(promptRows)
-		hasContextFiles = found
+		agent, _ := workspaceCtx.getWorkspaceAgent(ctx)
+
+		// When the chat-context-pin experiment is enabled and the chat
+		// has a pinned context copy, build the instruction and skills
+		// from that copy. The pinned and history paths are mutually
+		// exclusive: hasContextFiles stays false here so the history
+		// fallback below does not overwrite the pinned values.
+		pinnedInstruction, pinnedSkills, ok, pinErr := server.pinnedWorkspaceContext(ctx, chat, agent)
+		if pinErr != nil {
+			cleanup()
+			return generationPrepared{}, xerrors.Errorf("load pinned chat context: %w", pinErr)
+		}
+		if ok {
+			instruction = pinnedInstruction
+			workspaceSkills = pinnedSkills
+		} else {
+			_, found := contextFileAgentID(promptRows)
+			hasContextFiles = found
+		}
 	}
 
 	var g2 errgroup.Group

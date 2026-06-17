@@ -210,6 +210,7 @@ type Server struct {
 
 	aibridgeTransportFactory *atomic.Pointer[aibridge.TransportFactory]
 	aiGatewayRoutingEnabled  bool
+	experiments              codersdk.Experiments
 
 	// Configuration
 	pendingChatAcquireInterval time.Duration
@@ -3303,6 +3304,10 @@ type Config struct {
 	Clock                          quartz.Clock
 	AIBridgeTransportFactory       *atomic.Pointer[aibridge.TransportFactory]
 	AIGatewayRoutingEnabled        bool
+	// Experiments are the deployment's enabled experiments. Used to
+	// gate experimental chat behavior such as the pinned workspace
+	// context prompt path.
+	Experiments codersdk.Experiments
 
 	PrometheusRegistry prometheus.Registerer
 
@@ -3399,6 +3404,7 @@ func New(ps pubsub.Pubsub, cfg Config) *Server {
 		},
 		aibridgeTransportFactory:   cfg.AIBridgeTransportFactory,
 		aiGatewayRoutingEnabled:    cfg.AIGatewayRoutingEnabled,
+		experiments:                slices.Clone(cfg.Experiments),
 		pendingChatAcquireInterval: pendingChatAcquireInterval,
 		maxChatsPerAcquire:         maxChatsPerAcquire,
 		inFlightChatStaleAfter:     inFlightChatStaleAfter,
