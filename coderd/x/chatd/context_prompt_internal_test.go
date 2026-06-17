@@ -172,6 +172,37 @@ func TestContextResourcesToPrompt(t *testing.T) {
 		require.Equal(t, "deploy", skills[0].Name)
 	})
 
+	t.Run("SkipsEmptyNameSkill", func(t *testing.T) {
+		t.Parallel()
+
+		// Defensive boundary on the agent's own marshaling: an OK skill with an
+		// empty name contributes nothing and is not counted as malformed.
+		resources := []database.ChatContextResource{
+			skillResource(t, "/home/coder/.coder/skills/nameless", "", "no name", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills, malformed := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+		require.Zero(t, malformed)
+	})
+
+	t.Run("SkipsEmptyInstructionContent", func(t *testing.T) {
+		t.Parallel()
+
+		// Whitespace-only content sanitizes to empty, so the instruction file
+		// contributes no context-file part, emits no header, and is not counted
+		// as malformed.
+		resources := []database.ChatContextResource{
+			instructionResource(t, "/home/coder/AGENTS.md", "  \n\t  ", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills, malformed := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+		require.Zero(t, malformed)
+	})
+
 	t.Run("EmptyInput", func(t *testing.T) {
 		t.Parallel()
 

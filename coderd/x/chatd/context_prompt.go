@@ -29,20 +29,19 @@ func agentWorkingDir(agent database.WorkspaceAgent) string {
 
 // pinnedWorkspaceContext builds the system-prompt instruction block and
 // workspace skills from the chat's pinned context resources
-// (chat_context_resources), the per-chat copy populated at hydrate and
-// refresh time once the workspace agent has reported context.
+// (chat_context_resources), populated at hydrate and refresh time.
 //
-// ok reports whether the caller should use the returned values instead of
-// the per-turn, history-derived path. It is false when the chat has no
-// pinned rows, as happens for an older agent that never reported context or
-// a chat not yet hydrated, so the caller falls back to the legacy path. When
-// rows exist, ok is true even if they all filter to empty content, because
-// the pin is then the source of truth. A read error is returned rather than
-// swallowed, mirroring the other prompt-input reads in prepareGeneration.
+// ok reports whether the caller should use these values instead of the
+// per-turn, history-derived path. It is false when the chat has no pinned
+// rows (an older agent that never reported context, or a chat not yet
+// hydrated), so the caller falls back to the legacy path. When rows exist ok
+// is true even if they all filter to empty content, because the pin is then
+// the source of truth. A read error is returned rather than swallowed,
+// matching the other prompt-input reads in prepareGeneration.
 //
-// agent is optional decoration: its operating system and directory annotate
-// the instruction header. An unresolved (zero-value) agent does not force a
-// fallback, so the pin keeps working when the workspace is unreachable.
+// agent only decorates the instruction header with its OS and directory; an
+// unresolved (zero-value) agent does not force a fallback, so the pin keeps
+// working when the workspace is unreachable.
 func (server *Server) pinnedWorkspaceContext(
 	ctx context.Context,
 	chat database.Chat,
@@ -112,17 +111,16 @@ func (server *Server) resolveTurnWorkspaceContext(
 }
 
 // contextResourcesToPrompt converts a chat's pinned context resources into
-// the formatted instruction block and workspace skill metadata for the
-// system prompt. It is the inverse of the protojson bodies written by the
-// agent context push.
+// the formatted instruction block and workspace skill metadata, the inverse
+// of the protojson bodies written by the agent context push.
 //
 // operatingSystem and directory annotate the instruction header and are
-// omitted when empty. Only OK resources contribute; non-OK statuses, unknown
-// body kinds (mcp_config, mcp_server, and the reserved kinds), and malformed
-// bodies are skipped. malformed counts OK resources whose body failed to
-// decode so the caller can surface an otherwise silent drop. The instruction
-// header is emitted only when at least one instruction file has content, so a
-// skill-only pin produces no instruction block, matching the per-turn path.
+// omitted when empty. Only OK resources of a prompt body kind contribute;
+// other statuses, body kinds, and malformed bodies are skipped. malformed
+// counts OK resources whose body failed to decode, so the caller can surface
+// an otherwise silent drop. The header is emitted only when at least one
+// instruction file has content, so a skill-only pin produces no instruction
+// block, matching the per-turn path.
 func contextResourcesToPrompt(
 	resources []database.ChatContextResource,
 	operatingSystem, directory string,
