@@ -30,14 +30,15 @@ func agentWorkingDir(agent database.WorkspaceAgent) string {
 // pinnedWorkspaceContext builds the system-prompt instruction block and
 // workspace skills from the chat's pinned context resources
 // (chat_context_resources), the per-chat copy populated at hydrate and
-// refresh time. It is gated behind ExperimentChatContextPin.
+// refresh time once the workspace agent has reported context.
 //
 // ok reports whether the caller should use the returned values instead of
-// the per-turn, history-derived path. It is false when the experiment is off
-// or the chat has no pinned rows, so the caller falls back. When rows exist,
-// ok is true even if they all filter to empty content, because the pin is
-// then the source of truth. A read error is returned rather than swallowed,
-// mirroring the other prompt-input reads in prepareGeneration.
+// the per-turn, history-derived path. It is false when the chat has no
+// pinned rows, as happens for an older agent that never reported context or
+// a chat not yet hydrated, so the caller falls back to the legacy path. When
+// rows exist, ok is true even if they all filter to empty content, because
+// the pin is then the source of truth. A read error is returned rather than
+// swallowed, mirroring the other prompt-input reads in prepareGeneration.
 //
 // agent is optional decoration: its operating system and directory annotate
 // the instruction header. An unresolved (zero-value) agent does not force a
@@ -47,10 +48,6 @@ func (server *Server) pinnedWorkspaceContext(
 	chat database.Chat,
 	agent database.WorkspaceAgent,
 ) (instruction string, skills []chattool.SkillMeta, ok bool, err error) {
-	if !server.experiments.Enabled(codersdk.ExperimentChatContextPin) {
-		return "", nil, false, nil
-	}
-
 	resources, err := server.db.ListChatContextResourcesByChatID(ctx, chat.ID)
 	if err != nil {
 		return "", nil, false, xerrors.Errorf("list chat context resources: %w", err)
@@ -80,11 +77,12 @@ func (server *Server) pinnedWorkspaceContext(
 }
 
 // resolveTurnWorkspaceContext selects the instruction block and workspace
-// skills for a turn. It prefers the chat's pinned context copy (gated by
-// ExperimentChatContextPin) and falls back to the per-turn, history-derived
-// context-file and skill parts. The two paths are mutually exclusive. agent
-// is the chat's resolved workspace agent, used only to decorate the pinned
-// instruction header. A non-workspace chat yields no context.
+// skills for a turn. It prefers the chat's pinned context copy when the
+// workspace agent has reported context, and falls back to the per-turn,
+// history-derived context-file and skill parts for older agents that have
+// not. The two paths are mutually exclusive. agent is the chat's resolved
+// workspace agent, used only to decorate the pinned instruction header. A
+// non-workspace chat yields no context.
 func (server *Server) resolveTurnWorkspaceContext(
 	ctx context.Context,
 	chat database.Chat,
