@@ -513,7 +513,16 @@ func (a *agent) init() {
 		Clock:          a.clock,
 		WorkingDir:     workingDirFn,
 		InitialSources: initialContextSources(a.contextConfig, workingDirFn),
+		// Surface live MCP servers (and their tools) in the
+		// snapshot by reading the MCP manager's cached tool list
+		// on every resolve.
+		MCP: mcpContextProvider{cachedTools: a.mcpManager.CachedTools},
 	})
+	// Re-resolve the context snapshot whenever the MCP tool set
+	// changes (e.g. a .mcp.json edit reconnects servers) so MCP
+	// server resources track the live tools. Wired after both
+	// managers exist; the MCP manager fires this outside its lock.
+	a.mcpManager.SetOnToolsChanged(a.contextManager.Trigger)
 	a.contextAPI = agentcontext.NewAPI(a.contextManager)
 	a.reconnectingPTYServer = reconnectingpty.NewServer(
 		a.logger.Named("reconnecting-pty"),

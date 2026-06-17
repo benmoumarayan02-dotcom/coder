@@ -38,6 +38,12 @@ type ManagerOptions struct {
 	// Tests use this to inject MCP providers and tighten
 	// caps.
 	Resolver *Resolver
+	// MCP, when non-nil, supplies live MCP server resources to
+	// the resolver. It is applied to the resolver (default or
+	// injected via Resolver) so MCP servers participate in
+	// every snapshot. An MCP set directly on an injected
+	// Resolver takes precedence.
+	MCP MCPProvider
 	// Debounce overrides the watcher's debounce window.
 	Debounce time.Duration
 }
@@ -117,6 +123,11 @@ func NewManager(opts ManagerOptions) *Manager {
 	resolver := opts.Resolver
 	if resolver == nil {
 		resolver = &Resolver{}
+	}
+	// Apply the MCP provider to whichever resolver is used, unless
+	// an injected resolver already set one (which takes precedence).
+	if opts.MCP != nil && resolver.MCP == nil {
+		resolver.MCP = opts.MCP
 	}
 
 	m := &Manager{

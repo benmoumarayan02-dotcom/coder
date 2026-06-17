@@ -128,6 +128,13 @@ type Manager struct {
 	// in-flight reload (for example, to verify Close()'s
 	// shutdown ordering does not stall on a stuck connect).
 	connectStartedHook func()
+
+	// onToolsChanged is invoked (outside m.mu) after a reload
+	// writes a new tool cache, letting listeners such as the
+	// agentcontext manager re-resolve so MCP server resources
+	// track the live tool set. Guarded by m.mu; nil until set
+	// via SetOnToolsChanged.
+	onToolsChanged func()
 }
 
 // serverEntry pairs a server config with its connected client.
@@ -189,6 +196,17 @@ func (m *Manager) MarkStartupSettled() {
 	m.startupOnce.Do(func() { close(m.startupSettled) })
 }
 
+// SetOnToolsChanged registers a callback invoked after a reload
+// updates the cached tool set. The callback runs outside the
+// manager lock and must not block; it is typically wired to the
+// agentcontext manager's Trigger so MCP server resources are
+// re-resolved when tools change. Passing nil clears the hook.
+func (m *Manager) SetOnToolsChanged(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onToolsChanged = fn
+}
+
 // Tools returns the current MCP tool cache after startup-safe config
 // synchronization.
 //
@@ -209,13 +227,13 @@ func (m *Manager) Tools(ctx context.Context, paths []string) ([]workspacesdk.MCP
 		return m.toolsAfterReloadError(err)
 	}
 	if !started {
-		return normalizeTools(m.cachedTools()), nil
+		return normalizeTools(m.CachedTools()), nil
 	}
 
 	if err := m.waitReload(ctx, ch, toolsReloadTimeout); err != nil {
 		return m.toolsAfterReloadError(err)
 	}
-	return normalizeTools(m.cachedTools()), nil
+	return normalizeTools(m.CachedTools()), nil
 }
 
 func (m *Manager) waitForStartupSettled(ctx context.Context) error {
@@ -728,8 +746,13 @@ func captureSnapshot(paths []string) map[string]fileSnapshot {
 	return snap
 }
 
-// cachedTools returns the cached tool list. Thread-safe.
-func (m *Manager) cachedTools() []workspacesdk.MCPToolInfo {
+// CachedTools returns a copy of the current tool cache. It is
+// thread-safe and non-blocking (no startup-settle wait or reload),
+// intended for callers that must never block, e.g. the agentcontext
+// resolver's MCP provider invoked on every re-resolve. The cache is
+// empty until the first reload completes; SetOnToolsChanged lets
+// callers learn when it is populated.
+func (m *Manager) CachedTools() []workspacesdk.MCPToolInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -858,10 +881,20 @@ func (m *Manager) RefreshTools(ctx context.Context) error {
 	// Skip the write if the server map changed since the
 	// snapshot. A doReload that bumped the generation will
 	// produce a correct tool list; this write would be stale.
+	changed := false
 	if m.serverGen == gen {
 		m.tools = merged
+		changed = true
 	}
+	cb := m.onToolsChanged
 	m.mu.Unlock()
+
+	// Notify listeners outside the lock so a re-resolve can pick up
+	// the new tool set. Fired only when this reload actually wrote
+	// the cache; listeners dedupe via the snapshot aggregate hash.
+	if changed && cb != nil {
+		cb()
+	}
 
 	return errors.Join(errs...)
 }

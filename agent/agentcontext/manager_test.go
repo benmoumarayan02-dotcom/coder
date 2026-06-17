@@ -395,3 +395,34 @@ func TestManager_SubscribeBroadcastOnChange(t *testing.T) {
 		t.Fatal("expected subscriber to be notified")
 	}
 }
+
+// TestManager_MCPProviderOptionAppliesToSnapshot verifies that an MCP
+// provider supplied via ManagerOptions.MCP contributes KindMCPServer
+// resources (with their tools) to the resolved snapshot.
+func TestManager_MCPProviderOptionAppliesToSnapshot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	m := newTestManager(t, agentcontext.ManagerOptions{
+		WorkingDir: func() string { return dir },
+		MCP: &fakeMCPProvider{resources: []agentcontext.Resource{{
+			ID:     "mcp_server:fs",
+			Kind:   agentcontext.KindMCPServer,
+			Source: "fs",
+			Name:   "fs",
+			Status: agentcontext.StatusOK,
+			Tools:  []agentcontext.MCPTool{{Name: "fs__read", Description: "Read"}},
+		}}},
+	})
+
+	snap := m.Snapshot()
+	var found bool
+	for _, r := range snap.Resources {
+		if r.Kind == agentcontext.KindMCPServer && r.Source == "fs" {
+			found = true
+			require.Len(t, r.Tools, 1)
+			require.Equal(t, "fs__read", r.Tools[0].Name)
+		}
+	}
+	require.True(t, found, "expected MCP server resource in snapshot")
+}

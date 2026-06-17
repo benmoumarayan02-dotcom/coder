@@ -38,7 +38,7 @@ func awaitTools(ctx context.Context, t *testing.T, m *Manager, pred func([]works
 	t.Helper()
 	var final []workspacesdk.MCPToolInfo
 	testutil.Eventually(ctx, t, func(context.Context) bool {
-		final = m.cachedTools()
+		final = m.CachedTools()
 		return pred(final)
 	}, testutil.IntervalFast)
 	return final
@@ -74,7 +74,7 @@ func TestWatcher_LateFileTriggersReload(t *testing.T) {
 
 	// First Reload arms the watcher but finds nothing on disk.
 	require.NoError(t, m.Reload(ctx, []string{configPath}))
-	require.Empty(t, m.cachedTools(), "manager should start with no tools")
+	require.Empty(t, m.CachedTools(), "manager should start with no tools")
 
 	// Write the file after the manager has already settled. The
 	// watcher must observe the Create event, debounce it, and
@@ -114,7 +114,7 @@ func TestWatcher_RewriteTriggersReload(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Reload(ctx, []string{configPath}))
-	tools := m.cachedTools()
+	tools := m.CachedTools()
 	require.Len(t, tools, 1)
 	assert.Contains(t, tools[0].Name, "srv")
 
@@ -153,14 +153,14 @@ func TestWatcher_RemovalTransitionsToEmpty(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Reload(ctx, []string{configPath}))
-	require.Len(t, m.cachedTools(), 1)
+	require.Len(t, m.CachedTools(), 1)
 
 	require.NoError(t, os.Remove(configPath))
 
 	awaitTools(ctx, t, m, func(tools []workspacesdk.MCPToolInfo) bool {
 		return len(tools) == 0
 	})
-	assert.Empty(t, m.cachedTools())
+	assert.Empty(t, m.CachedTools())
 }
 
 // TestWatcher_DebouncesBurst uses the quartz mock clock to
@@ -288,7 +288,7 @@ func TestWatcher_DualAgentHTTPNoStall(t *testing.T) {
 
 	// First Reload races ahead of the host agent: empty config.
 	require.NoError(t, m.Reload(ctx, []string{configPath}))
-	require.Empty(t, m.cachedTools())
+	require.Empty(t, m.CachedTools())
 
 	api := NewAPI(logger, m, func() []string { return []string{configPath} })
 
@@ -347,7 +347,7 @@ func TestWatcher_LateParentDirTriggersReload(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Reload(ctx, []string{configPath}))
-	require.Empty(t, m.cachedTools())
+	require.Empty(t, m.CachedTools())
 
 	// Create the missing parent directory. fsnotify will deliver
 	// a Create event on root; handleEvent must release the root
