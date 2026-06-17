@@ -168,6 +168,70 @@ type ChatContext struct {
 	// Error is the snapshot-level error copied from the pinned snapshot
 	// (empty when healthy).
 	Error string `json:"error,omitempty"`
+	// Resources is the chat's pinned context (instruction files and
+	// skills) the prompt is built from, metadata only (no bodies). It is
+	// populated only on the single-chat GET response; list and watch
+	// payloads leave it nil to stay lightweight.
+	Resources []ChatContextResource `json:"resources,omitempty"`
+	// Changes lists how the pinned context differs from the agent's latest
+	// snapshot, by source. It is populated only on the single-chat GET
+	// response and only while the chat is dirty; otherwise nil.
+	Changes []ChatContextResourceChange `json:"changes,omitempty"`
+}
+
+// ChatContextResourceKind classifies a pinned context resource the prompt
+// uses. Only the kinds that contribute to the prompt are reported.
+type ChatContextResourceKind string
+
+const (
+	ChatContextResourceKindInstructionFile ChatContextResourceKind = "instruction_file"
+	ChatContextResourceKindSkill           ChatContextResourceKind = "skill"
+)
+
+// ChatContextResource is one pinned workspace-context resource the chat's
+// prompt is built from. It is metadata only; bodies are omitted. Reported
+// only on the single-chat GET response.
+type ChatContextResource struct {
+	// Source is the resource locator: the canonical file path for an
+	// instruction file, or the skill directory for a skill.
+	Source string                  `json:"source"`
+	Kind   ChatContextResourceKind `json:"kind"`
+	// SizeBytes is the original payload size in bytes.
+	SizeBytes int64 `json:"size_bytes"`
+	// SkillName and SkillDescription are populated only for skill kinds.
+	SkillName        string `json:"skill_name,omitempty"`
+	SkillDescription string `json:"skill_description,omitempty"`
+}
+
+// ChatContextResourceChangeStatus classifies how a source differs between the
+// chat's pinned context and the agent's latest snapshot.
+type ChatContextResourceChangeStatus string
+
+const (
+	ChatContextResourceChangeStatusAdded    ChatContextResourceChangeStatus = "added"
+	ChatContextResourceChangeStatusRemoved  ChatContextResourceChangeStatus = "removed"
+	ChatContextResourceChangeStatusModified ChatContextResourceChangeStatus = "modified"
+)
+
+// ChatContextResourceChange is one source-level difference between the chat's
+// pinned context and the agent's latest snapshot. Reported only on the
+// single-chat GET response while the chat is dirty.
+type ChatContextResourceChange struct {
+	// Source is the resource locator that differs.
+	Source string                          `json:"source"`
+	Kind   ChatContextResourceKind         `json:"kind"`
+	Status ChatContextResourceChangeStatus `json:"status"`
+	// OldContent and NewContent carry the sanitized instruction-file bodies
+	// for the pinned and snapshot sides, capped for display. Removed changes
+	// fill OldContent only, added changes fill NewContent only, and modified
+	// changes fill both. Empty for skills.
+	OldContent string `json:"old_content,omitempty"`
+	NewContent string `json:"new_content,omitempty"`
+	// SkillName and SkillDescription identify a changed skill: the snapshot
+	// side for added/modified, the pinned side for removed. Empty for
+	// instruction files.
+	SkillName        string `json:"skill_name,omitempty"`
+	SkillDescription string `json:"skill_description,omitempty"`
 }
 
 // ChatFileMetadata contains lightweight metadata about a file

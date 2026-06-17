@@ -2,6 +2,7 @@ package chatd
 
 import (
 	"context"
+	"encoding/json"
 
 	"golang.org/x/xerrors"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -17,6 +18,27 @@ import (
 // the agent context push (coderd/agentapi/context.go). DiscardUnknown keeps
 // the reader forward compatible as new body fields are added to the proto.
 var contextBodyUnmarshalOptions = protojson.UnmarshalOptions{DiscardUnknown: true}
+
+// decodeInstructionFileBody decodes a protojson instruction-file resource
+// body. ok is false when the body cannot be decoded, letting callers count it
+// as malformed rather than silently treating it as empty.
+func decodeInstructionFileBody(body json.RawMessage) (*agentproto.InstructionFileBody, bool) {
+	var decoded agentproto.InstructionFileBody
+	if err := contextBodyUnmarshalOptions.Unmarshal(body, &decoded); err != nil {
+		return nil, false
+	}
+	return &decoded, true
+}
+
+// decodeSkillMetaBody decodes a protojson skill resource body. ok is false
+// when the body cannot be decoded.
+func decodeSkillMetaBody(body json.RawMessage) (*agentproto.SkillMetaBody, bool) {
+	var decoded agentproto.SkillMetaBody
+	if err := contextBodyUnmarshalOptions.Unmarshal(body, &decoded); err != nil {
+		return nil, false
+	}
+	return &decoded, true
+}
 
 // pinnedWorkspaceContext builds the system-prompt instruction block and
 // workspace skills from the chat's pinned context resources
@@ -127,8 +149,8 @@ func contextResourcesToPrompt(
 		}
 		switch r.BodyKind {
 		case database.WorkspaceAgentContextBodyKindInstructionFile:
-			var body agentproto.InstructionFileBody
-			if err := contextBodyUnmarshalOptions.Unmarshal(r.Body, &body); err != nil {
+			body, decoded := decodeInstructionFileBody(r.Body)
+			if !decoded {
 				malformed++
 				continue
 			}
@@ -142,8 +164,8 @@ func contextResourcesToPrompt(
 				ContextFileContent: content,
 			})
 		case database.WorkspaceAgentContextBodyKindSkill:
-			var body agentproto.SkillMetaBody
-			if err := contextBodyUnmarshalOptions.Unmarshal(r.Body, &body); err != nil {
+			body, decoded := decodeSkillMetaBody(r.Body)
+			if !decoded {
 				malformed++
 				continue
 			}

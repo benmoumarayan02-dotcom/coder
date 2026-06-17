@@ -14910,6 +14910,13 @@
 		"codersdk.ChatContext": {
 			"type": "object",
 			"properties": {
+				"changes": {
+					"description": "Changes lists how the pinned context differs from the agent's latest\nsnapshot, by source. It is populated only on the single-chat GET\nresponse and only while the chat is dirty; otherwise nil.",
+					"type": "array",
+					"items": {
+						"$ref": "#/definitions/codersdk.ChatContextResourceChange"
+					}
+				},
 				"dirty": {
 					"description": "Dirty is true when the agent's latest snapshot hash differs from the\nchat's pinned hash.",
 					"type": "boolean"
@@ -14922,8 +14929,84 @@
 				"error": {
 					"description": "Error is the snapshot-level error copied from the pinned snapshot\n(empty when healthy).",
 					"type": "string"
+				},
+				"resources": {
+					"description": "Resources is the chat's pinned context (instruction files and\nskills) the prompt is built from, metadata only (no bodies). It is\npopulated only on the single-chat GET response; list and watch\npayloads leave it nil to stay lightweight.",
+					"type": "array",
+					"items": {
+						"$ref": "#/definitions/codersdk.ChatContextResource"
+					}
 				}
 			}
+		},
+		"codersdk.ChatContextResource": {
+			"type": "object",
+			"properties": {
+				"kind": {
+					"$ref": "#/definitions/codersdk.ChatContextResourceKind"
+				},
+				"size_bytes": {
+					"description": "SizeBytes is the original payload size in bytes.",
+					"type": "integer"
+				},
+				"skill_description": {
+					"type": "string"
+				},
+				"skill_name": {
+					"description": "SkillName and SkillDescription are populated only for skill kinds.",
+					"type": "string"
+				},
+				"source": {
+					"description": "Source is the resource locator: the canonical file path for an\ninstruction file, or the skill directory for a skill.",
+					"type": "string"
+				}
+			}
+		},
+		"codersdk.ChatContextResourceChange": {
+			"type": "object",
+			"properties": {
+				"kind": {
+					"$ref": "#/definitions/codersdk.ChatContextResourceKind"
+				},
+				"new_content": {
+					"type": "string"
+				},
+				"old_content": {
+					"description": "OldContent and NewContent carry the sanitized instruction-file bodies\nfor the pinned and snapshot sides, capped for display. Removed changes\nfill OldContent only, added changes fill NewContent only, and modified\nchanges fill both. Empty for skills.",
+					"type": "string"
+				},
+				"skill_description": {
+					"type": "string"
+				},
+				"skill_name": {
+					"description": "SkillName and SkillDescription identify a changed skill: the snapshot\nside for added/modified, the pinned side for removed. Empty for\ninstruction files.",
+					"type": "string"
+				},
+				"source": {
+					"description": "Source is the resource locator that differs.",
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/definitions/codersdk.ChatContextResourceChangeStatus"
+				}
+			}
+		},
+		"codersdk.ChatContextResourceChangeStatus": {
+			"type": "string",
+			"enum": ["added", "removed", "modified"],
+			"x-enum-varnames": [
+				"ChatContextResourceChangeStatusAdded",
+				"ChatContextResourceChangeStatusRemoved",
+				"ChatContextResourceChangeStatusModified"
+			]
+		},
+		"codersdk.ChatContextResourceKind": {
+			"type": "string",
+			"enum": ["instruction_file", "skill"],
+			"x-enum-varnames": [
+				"ChatContextResourceKindInstructionFile",
+				"ChatContextResourceKindSkill"
+			]
 		},
 		"codersdk.ChatDiffContents": {
 			"type": "object",

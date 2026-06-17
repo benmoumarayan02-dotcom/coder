@@ -1626,6 +1626,19 @@ export interface ChatContext {
 	 * (empty when healthy).
 	 */
 	readonly error?: string;
+	/**
+	 * Resources is the chat's pinned context (instruction files and
+	 * skills) the prompt is built from, metadata only (no bodies). It is
+	 * populated only on the single-chat GET response; list and watch
+	 * payloads leave it nil to stay lightweight.
+	 */
+	readonly resources?: readonly ChatContextResource[];
+	/**
+	 * Changes lists how the pinned context differs from the agent's latest
+	 * snapshot, by source. It is populated only on the single-chat GET
+	 * response and only while the chat is dirty; otherwise nil.
+	 */
+	readonly changes?: readonly ChatContextResourceChange[];
 }
 
 // From codersdk/chats.go
@@ -1649,6 +1662,74 @@ export interface ChatContextFilePart {
 	 */
 	readonly context_file_agent_id?: string;
 }
+
+// From codersdk/chats.go
+/**
+ * ChatContextResource is one pinned workspace-context resource the chat's
+ * prompt is built from. It is metadata only; bodies are omitted. Reported
+ * only on the single-chat GET response.
+ */
+export interface ChatContextResource {
+	/**
+	 * Source is the resource locator: the canonical file path for an
+	 * instruction file, or the skill directory for a skill.
+	 */
+	readonly source: string;
+	readonly kind: ChatContextResourceKind;
+	/**
+	 * SizeBytes is the original payload size in bytes.
+	 */
+	readonly size_bytes: number;
+	/**
+	 * SkillName and SkillDescription are populated only for skill kinds.
+	 */
+	readonly skill_name?: string;
+	readonly skill_description?: string;
+}
+
+// From codersdk/chats.go
+/**
+ * ChatContextResourceChange is one source-level difference between the chat's
+ * pinned context and the agent's latest snapshot. Reported only on the
+ * single-chat GET response while the chat is dirty.
+ */
+export interface ChatContextResourceChange {
+	/**
+	 * Source is the resource locator that differs.
+	 */
+	readonly source: string;
+	readonly kind: ChatContextResourceKind;
+	readonly status: ChatContextResourceChangeStatus;
+	/**
+	 * OldContent and NewContent carry the sanitized instruction-file bodies
+	 * for the pinned and snapshot sides, capped for display. Removed changes
+	 * fill OldContent only, added changes fill NewContent only, and modified
+	 * changes fill both. Empty for skills.
+	 */
+	readonly old_content?: string;
+	readonly new_content?: string;
+	/**
+	 * SkillName and SkillDescription identify a changed skill: the snapshot
+	 * side for added/modified, the pinned side for removed. Empty for
+	 * instruction files.
+	 */
+	readonly skill_name?: string;
+	readonly skill_description?: string;
+}
+
+// From codersdk/chats.go
+export type ChatContextResourceChangeStatus = "added" | "modified" | "removed";
+
+export const ChatContextResourceChangeStatuses: ChatContextResourceChangeStatus[] =
+	["added", "modified", "removed"];
+
+// From codersdk/chats.go
+export type ChatContextResourceKind = "instruction_file" | "skill";
+
+export const ChatContextResourceKinds: ChatContextResourceKind[] = [
+	"instruction_file",
+	"skill",
+];
 
 // From codersdk/chats.go
 /**

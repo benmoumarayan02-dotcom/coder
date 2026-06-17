@@ -1,5 +1,8 @@
 import type {
 	Chat,
+	ChatContext,
+	ChatContextResource,
+	ChatContextResourceChange,
 	ChatMessage,
 	ChatQueuedMessage,
 	MCPServerConfig,
@@ -28,6 +31,58 @@ export const MockChat: Chat = {
 	has_unread: false,
 	client_type: "ui",
 	children: [],
+};
+
+// Pinned workspace-context resources the prompt is built from.
+const MockChatContextResources: ChatContextResource[] = [
+	{
+		source: "/home/coder/AGENTS.md",
+		kind: "instruction_file",
+		size_bytes: 248,
+	},
+	{
+		source: "/home/coder/.coder/skills/deploy",
+		kind: "skill",
+		size_bytes: 96,
+		skill_name: "deploy",
+		skill_description: "Deploy the app to staging.",
+	},
+];
+
+// Per-source differences between the pinned context and the latest snapshot.
+const MockChatContextChanges: ChatContextResourceChange[] = [
+	{
+		source: "/home/coder/AGENTS.md",
+		kind: "instruction_file",
+		status: "modified",
+		old_content: "# AGENTS\n\nBe concise.\n",
+		new_content: "# AGENTS\n\nBe concise and cite sources.\n",
+	},
+	{
+		source: "/home/coder/docs/CONTEXT.md",
+		kind: "instruction_file",
+		status: "added",
+		new_content: "# Context\n\nProject overview.\n",
+	},
+	{
+		source: "/home/coder/.coder/skills/deploy",
+		kind: "skill",
+		status: "modified",
+		skill_name: "deploy",
+		skill_description: "Deploy the app to production.",
+	},
+];
+
+export const MockChatContextClean: ChatContext = {
+	dirty: false,
+	resources: MockChatContextResources,
+};
+
+export const MockChatContextDirty: ChatContext = {
+	dirty: true,
+	dirty_since: "2024-01-02T00:00:00Z",
+	resources: MockChatContextResources,
+	changes: MockChatContextChanges,
 };
 
 export const MockMCPServerConfig: MCPServerConfig = {

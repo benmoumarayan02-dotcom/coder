@@ -1,11 +1,13 @@
-import { FileIcon, ZapIcon } from "lucide-react";
+import { FileIcon, TriangleAlertIcon, ZapIcon } from "lucide-react";
 import { type FC, useRef, useState } from "react";
-import type { ChatMessagePart } from "#/api/typesGenerated";
+import type { ChatContext, ChatMessagePart } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
 } from "#/components/Popover/Popover";
+import { Spinner } from "#/components/Spinner/Spinner";
 import {
 	Tooltip,
 	TooltipContent,
@@ -15,6 +17,7 @@ import {
 import { cn } from "#/utils/cn";
 import { isMobileViewport } from "#/utils/mobile";
 import { getPathBasename } from "../utils/path";
+import { ContextChangesDialog } from "./ContextChangesDialog";
 import { SvgRingProgress } from "./SvgRingProgress";
 
 export interface AgentContextUsage {
@@ -25,11 +28,24 @@ export interface AgentContextUsage {
 	readonly cacheReadTokens?: number;
 	readonly cacheCreationTokens?: number;
 	readonly reasoningTokens?: number;
-	// Percentage (0–100) at which the context will be compacted.
+	// Percentage (0-100) at which the context will be compacted.
 	readonly compressionThreshold?: number;
-	// Last injected context parts (AGENTS.md files and skills).
+	// Last injected context parts (AGENTS.md files and skills). Used as a
+	// fallback to list the context when the chat's pinned resources have not
+	// loaded yet.
 	readonly lastInjectedContext?: readonly ChatMessagePart[];
+	// Pinned workspace-context state: the resources the chat is built from and
+	// whether they have drifted from the agent's latest snapshot.
+	readonly context?: ChatContext;
 }
+
+// Normalized popover entries, sourced from either the chat's pinned context
+// resources or, as a fallback, the last injected context parts.
+type ContextFileItem = { readonly path: string; readonly truncated?: boolean };
+type ContextSkillItem = {
+	readonly name: string;
+	readonly description?: string;
+};
 
 const hasFiniteTokenValue = (value: number | undefined): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -72,10 +88,13 @@ const RING_STROKE = 2.5;
 // the user time to move into the popover content.
 const HOVER_CLOSE_DELAY_MS = 150;
 
-export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
-	usage,
-}) => {
+export const ContextUsageIndicator: FC<{
+	usage: AgentContextUsage | null;
+	onRefreshContext?: () => void;
+	isRefreshingContext?: boolean;
+}> = ({ usage, onRefreshContext, isRefreshingContext }) => {
 	const [open, setOpen] = useState(false);
+	const [changesOpen, setChangesOpen] = useState(false);
 	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const cancelClose = () => {
@@ -117,21 +136,57 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 		? Math.min(Math.max(percentUsed, 0), 100)
 		: 100;
 	const toneClassName = getIndicatorToneClassName(percentUsed);
-	const ariaLabel = hasPercent
-		? `Context usage ${percentLabel}. ${formatTokenCount(usedTokens)} of ${formatTokenCount(contextLimitTokens)} tokens used.`
-		: "Context usage";
 
-	// Extract context files and skills from lastInjectedContext.
-	const contextFiles =
-		usage?.lastInjectedContext?.filter((p) => p.type === "context-file") ?? [];
-	const skills =
-		usage?.lastInjectedContext?.filter((p) => p.type === "skill") ?? [];
-	const hasInjectedContext = contextFiles.length > 0 || skills.length > 0;
+	const context = usage?.context;
+	const isDirty = context?.dirty ?? false;
+	const contextError = context?.error ?? "";
+	const hasContextError = contextError !== "";
+	const changes = context?.changes ?? [];
+	const pinnedResources = context?.resources;
+
+	// Drive the listed context from the chat's pinned resources, falling back
+	// to the last injected context parts while the pin has not loaded.
+	const usePinned = (pinnedResources?.length ?? 0) > 0;
+	const fileItems: readonly ContextFileItem[] = usePinned
+		? (pinnedResources ?? [])
+				.filter((resource) => resource.kind === "instruction_file")
+				.map((resource) => ({ path: resource.source }))
+		: (usage?.lastInjectedContext ?? [])
+				.filter((part) => part.type === "context-file")
+				.map((part) => ({
+					path: part.context_file_path,
+					truncated: part.context_file_truncated,
+				}));
+	const skillItems: readonly ContextSkillItem[] = usePinned
+		? (pinnedResources ?? [])
+				.filter((resource) => resource.kind === "skill")
+				.map((resource) => ({
+					name: resource.skill_name || getPathBasename(resource.source),
+					description: resource.skill_description,
+				}))
+		: (usage?.lastInjectedContext ?? [])
+				.filter((part) => part.type === "skill")
+				.map((part) => ({
+					name: part.skill_name,
+					description: part.skill_description,
+				}));
+	const hasContextList = fileItems.length > 0 || skillItems.length > 0;
+
+	const ariaLabel = hasPercent
+		? `Context usage ${percentLabel}. ${formatTokenCount(usedTokens)} of ${formatTokenCount(contextLimitTokens)} tokens used.${isDirty ? " Context changed." : ""}`
+		: isDirty
+			? "Context usage. Context changed."
+			: "Context usage";
+
+	const openChanges = () => {
+		setChangesOpen(true);
+		setOpen(false);
+	};
 
 	const panelContent = (
 		<div className="text-xs text-content-primary">
 			{hasPercent
-				? `${percentLabel} – ${formatTokenCountCompact(usedTokens)} / ${formatTokenCountCompact(contextLimitTokens)} context used`
+				? `${percentLabel} - ${formatTokenCountCompact(usedTokens)} / ${formatTokenCountCompact(contextLimitTokens)} context used`
 				: "Context usage unavailable"}
 			{hasPercent &&
 				usage?.compressionThreshold !== undefined &&
@@ -140,56 +195,49 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 						{`Compacts at ${usage.compressionThreshold}%`}
 					</div>
 				)}
-			{hasInjectedContext && (
+			{hasContextList && (
 				<div
 					className={cn(
 						"flex flex-col gap-2 text-content-secondary",
 						hasPercent && "mt-2",
 					)}
 				>
-					{contextFiles.length > 0 && (
+					{fileItems.length > 0 && (
 						<div className="flex flex-col gap-1">
 							<span className="font-medium text-content-primary">
 								Context files
 							</span>
-							{contextFiles.map((part) => {
-								if (part.type !== "context-file") return null;
-								return (
-									<div
-										key={part.context_file_path}
-										className="flex items-center gap-1.5"
-									>
-										<FileIcon className="size-3 shrink-0" />
-										<span className="truncate" title={part.context_file_path}>
-											{getPathBasename(part.context_file_path)}
+							{fileItems.map((file) => (
+								<div key={file.path} className="flex items-center gap-1.5">
+									<FileIcon className="size-3 shrink-0" />
+									<span className="truncate" title={file.path}>
+										{getPathBasename(file.path)}
+									</span>
+									{file.truncated && (
+										<span className="shrink-0 text-content-warning">
+											(truncated)
 										</span>
-										{part.context_file_truncated && (
-											<span className="shrink-0 text-content-warning">
-												(truncated)
-											</span>
-										)}
-									</div>
-								);
-							})}
+									)}
+								</div>
+							))}
 						</div>
 					)}
-					{skills.length > 0 && (
+					{skillItems.length > 0 && (
 						<div className="flex flex-col gap-1">
 							<span className="font-medium text-content-primary">Skills</span>
 							<TooltipProvider delayDuration={300}>
-								{skills.map((part) => {
-									if (part.type !== "skill") return null;
+								{skillItems.map((skill) => {
 									const row = (
 										<div className="flex items-center gap-1.5 rounded px-0.5 py-px transition-colors hover:bg-surface-tertiary">
 											<ZapIcon className="size-3 shrink-0" />
-											<span className="truncate">{part.skill_name}</span>
+											<span className="truncate">{skill.name}</span>
 										</div>
 									);
-									if (!part.skill_description) {
-										return <div key={part.skill_name}>{row}</div>;
+									if (!skill.description) {
+										return <div key={skill.name}>{row}</div>;
 									}
 									return (
-										<Tooltip key={part.skill_name}>
+										<Tooltip key={skill.name}>
 											<TooltipTrigger asChild>
 												<div className="cursor-default">{row}</div>
 											</TooltipTrigger>
@@ -198,7 +246,7 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 												sideOffset={4}
 												className="max-w-48 text-xs"
 											>
-												{part.skill_description}
+												{skill.description}
 											</TooltipContent>
 										</Tooltip>
 									);
@@ -206,6 +254,45 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 							</TooltipProvider>
 						</div>
 					)}
+				</div>
+			)}
+			{(isDirty || hasContextError) && (
+				<div className="mt-2 flex flex-col gap-1.5 border-0 border-t border-solid border-border-default pt-2">
+					{hasContextError ? (
+						<span className="flex items-center gap-1.5 font-medium text-content-destructive">
+							<TriangleAlertIcon className="size-3 shrink-0" />
+							Context error
+						</span>
+					) : (
+						<span className="flex items-center gap-1.5 font-medium text-content-warning">
+							<TriangleAlertIcon className="size-3 shrink-0" />
+							Context changed
+						</span>
+					)}
+					{hasContextError ? (
+						<span className="text-content-secondary">{contextError}</span>
+					) : (
+						<span className="text-content-secondary">
+							The workspace context changed since this chat was pinned.
+						</span>
+					)}
+					<div className="flex flex-wrap gap-2">
+						{changes.length > 0 && (
+							<Button size="sm" variant="outline" onClick={openChanges}>
+								View changes
+							</Button>
+						)}
+						{onRefreshContext && (
+							<Button
+								size="sm"
+								disabled={isRefreshingContext}
+								onClick={() => onRefreshContext()}
+							>
+								<Spinner loading={isRefreshingContext} />
+								Refresh context
+							</Button>
+						)}
+					</div>
 				</div>
 			)}
 		</div>
@@ -225,7 +312,28 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 				progressClassName="stroke-current"
 				className={cn("size-icon-sm", toneClassName)}
 			/>
+			{(isDirty || hasContextError) && (
+				<TriangleAlertIcon
+					aria-hidden
+					className={cn(
+						"absolute -right-0.5 -top-0.5 size-3",
+						hasContextError
+							? "text-content-destructive"
+							: "text-content-warning",
+					)}
+				/>
+			)}
 		</button>
+	);
+
+	const changesDialog = (
+		<ContextChangesDialog
+			open={changesOpen}
+			onOpenChange={setChangesOpen}
+			changes={changes}
+			onRefreshContext={onRefreshContext}
+			isRefreshingContext={isRefreshingContext}
+		/>
 	);
 
 	// On mobile, a tap toggles the popover. On desktop, hover opens
@@ -233,36 +341,42 @@ export const ContextUsageIndicator: FC<{ usage: AgentContextUsage | null }> = ({
 	// nested tooltips to the right (same pattern as ModelSelector).
 	if (isMobileViewport()) {
 		return (
-			<Popover>
-				<PopoverTrigger asChild>{triggerButton}</PopoverTrigger>
-				<PopoverContent
-					side="top"
-					className="mobile-full-width-dropdown mobile-full-width-dropdown-bottom w-auto max-w-72 px-3 py-2"
-				>
-					{panelContent}
-				</PopoverContent>
-			</Popover>
+			<>
+				<Popover>
+					<PopoverTrigger asChild>{triggerButton}</PopoverTrigger>
+					<PopoverContent
+						side="top"
+						className="mobile-full-width-dropdown mobile-full-width-dropdown-bottom w-auto max-w-72 px-3 py-2"
+					>
+						{panelContent}
+					</PopoverContent>
+				</Popover>
+				{changesDialog}
+			</>
 		);
 	}
 
 	return (
-		<Popover open={open} onOpenChange={setOpen}>
-			<PopoverTrigger asChild>
-				<div onMouseEnter={handleMouseEnter} onMouseLeave={scheduleClose}>
-					{triggerButton}
-				</div>
-			</PopoverTrigger>
-			<PopoverContent
-				side="top"
-				className="w-auto max-w-72 px-3 py-2"
-				onMouseEnter={cancelClose}
-				onMouseLeave={scheduleClose}
-				// Prevent the popover from stealing focus, which would
-				// interfere with the chat input.
-				onOpenAutoFocus={(e) => e.preventDefault()}
-			>
-				{panelContent}
-			</PopoverContent>
-		</Popover>
+		<>
+			<Popover open={open} onOpenChange={setOpen}>
+				<PopoverTrigger asChild>
+					<div onMouseEnter={handleMouseEnter} onMouseLeave={scheduleClose}>
+						{triggerButton}
+					</div>
+				</PopoverTrigger>
+				<PopoverContent
+					side="top"
+					className="w-auto max-w-72 px-3 py-2"
+					onMouseEnter={cancelClose}
+					onMouseLeave={scheduleClose}
+					// Prevent the popover from stealing focus, which would
+					// interfere with the chat input.
+					onOpenAutoFocus={(e) => e.preventDefault()}
+				>
+					{panelContent}
+				</PopoverContent>
+			</Popover>
+			{changesDialog}
+		</>
 	);
 };

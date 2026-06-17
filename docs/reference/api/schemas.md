@@ -1926,9 +1926,29 @@ AuthorizationObject can represent a "set" of objects, such as: all workspaces in
       "children": [],
       "client_type": "ui",
       "context": {
+        "changes": [
+          {
+            "kind": "instruction_file",
+            "new_content": "string",
+            "old_content": "string",
+            "skill_description": "string",
+            "skill_name": "string",
+            "source": "string",
+            "status": "added"
+          }
+        ],
         "dirty": true,
         "dirty_since": "2019-08-24T14:15:22Z",
-        "error": "string"
+        "error": "string",
+        "resources": [
+          {
+            "kind": "instruction_file",
+            "size_bytes": 0,
+            "skill_description": "string",
+            "skill_name": "string",
+            "source": "string"
+          }
+        ]
       },
       "created_at": "2019-08-24T14:15:22Z",
       "diff_status": {
@@ -2065,9 +2085,29 @@ AuthorizationObject can represent a "set" of objects, such as: all workspaces in
   ],
   "client_type": "ui",
   "context": {
+    "changes": [
+      {
+        "kind": "instruction_file",
+        "new_content": "string",
+        "old_content": "string",
+        "skill_description": "string",
+        "skill_name": "string",
+        "source": "string",
+        "status": "added"
+      }
+    ],
     "dirty": true,
     "dirty_since": "2019-08-24T14:15:22Z",
-    "error": "string"
+    "error": "string",
+    "resources": [
+      {
+        "kind": "instruction_file",
+        "size_bytes": 0,
+        "skill_description": "string",
+        "skill_name": "string",
+        "source": "string"
+      }
+    ]
   },
   "created_at": "2019-08-24T14:15:22Z",
   "diff_status": {
@@ -2342,19 +2382,117 @@ AuthorizationObject can represent a "set" of objects, such as: all workspaces in
 
 ```json
 {
+  "changes": [
+    {
+      "kind": "instruction_file",
+      "new_content": "string",
+      "old_content": "string",
+      "skill_description": "string",
+      "skill_name": "string",
+      "source": "string",
+      "status": "added"
+    }
+  ],
   "dirty": true,
   "dirty_since": "2019-08-24T14:15:22Z",
-  "error": "string"
+  "error": "string",
+  "resources": [
+    {
+      "kind": "instruction_file",
+      "size_bytes": 0,
+      "skill_description": "string",
+      "skill_name": "string",
+      "source": "string"
+    }
+  ]
 }
 ```
 
 ### Properties
 
-| Name          | Type    | Required | Restrictions | Description                                                                              |
-|---------------|---------|----------|--------------|------------------------------------------------------------------------------------------|
-| `dirty`       | boolean | false    |              | Dirty is true when the agent's latest snapshot hash differs from the chat's pinned hash. |
-| `dirty_since` | string  | false    |              | Dirty since is when drift was first detected; nil when not dirty.                        |
-| `error`       | string  | false    |              | Error is the snapshot-level error copied from the pinned snapshot (empty when healthy).  |
+| Name          | Type                                                                              | Required | Restrictions | Description                                                                                                                                                                                                                                |
+|---------------|-----------------------------------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `changes`     | array of [codersdk.ChatContextResourceChange](#codersdkchatcontextresourcechange) | false    |              | Changes lists how the pinned context differs from the agent's latest snapshot, by source. It is populated only on the single-chat GET response and only while the chat is dirty; otherwise nil.                                            |
+| `dirty`       | boolean                                                                           | false    |              | Dirty is true when the agent's latest snapshot hash differs from the chat's pinned hash.                                                                                                                                                   |
+| `dirty_since` | string                                                                            | false    |              | Dirty since is when drift was first detected; nil when not dirty.                                                                                                                                                                          |
+| `error`       | string                                                                            | false    |              | Error is the snapshot-level error copied from the pinned snapshot (empty when healthy).                                                                                                                                                    |
+| `resources`   | array of [codersdk.ChatContextResource](#codersdkchatcontextresource)             | false    |              | Resources is the chat's pinned context (instruction files and skills) the prompt is built from, metadata only (no bodies). It is populated only on the single-chat GET response; list and watch payloads leave it nil to stay lightweight. |
+
+## codersdk.ChatContextResource
+
+```json
+{
+  "kind": "instruction_file",
+  "size_bytes": 0,
+  "skill_description": "string",
+  "skill_name": "string",
+  "source": "string"
+}
+```
+
+### Properties
+
+| Name                | Type                                                                 | Required | Restrictions | Description                                                                                                          |
+|---------------------|----------------------------------------------------------------------|----------|--------------|----------------------------------------------------------------------------------------------------------------------|
+| `kind`              | [codersdk.ChatContextResourceKind](#codersdkchatcontextresourcekind) | false    |              |                                                                                                                      |
+| `size_bytes`        | integer                                                              | false    |              | Size bytes is the original payload size in bytes.                                                                    |
+| `skill_description` | string                                                               | false    |              |                                                                                                                      |
+| `skill_name`        | string                                                               | false    |              | Skill name and SkillDescription are populated only for skill kinds.                                                  |
+| `source`            | string                                                               | false    |              | Source is the resource locator: the canonical file path for an instruction file, or the skill directory for a skill. |
+
+## codersdk.ChatContextResourceChange
+
+```json
+{
+  "kind": "instruction_file",
+  "new_content": "string",
+  "old_content": "string",
+  "skill_description": "string",
+  "skill_name": "string",
+  "source": "string",
+  "status": "added"
+}
+```
+
+### Properties
+
+| Name                | Type                                                                                 | Required | Restrictions | Description                                                                                                                                                                                                                                               |
+|---------------------|--------------------------------------------------------------------------------------|----------|--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `kind`              | [codersdk.ChatContextResourceKind](#codersdkchatcontextresourcekind)                 | false    |              |                                                                                                                                                                                                                                                           |
+| `new_content`       | string                                                                               | false    |              |                                                                                                                                                                                                                                                           |
+| `old_content`       | string                                                                               | false    |              | Old content and NewContent carry the sanitized instruction-file bodies for the pinned and snapshot sides, capped for display. Removed changes fill OldContent only, added changes fill NewContent only, and modified changes fill both. Empty for skills. |
+| `skill_description` | string                                                                               | false    |              |                                                                                                                                                                                                                                                           |
+| `skill_name`        | string                                                                               | false    |              | Skill name and SkillDescription identify a changed skill: the snapshot side for added/modified, the pinned side for removed. Empty for instruction files.                                                                                                 |
+| `source`            | string                                                                               | false    |              | Source is the resource locator that differs.                                                                                                                                                                                                              |
+| `status`            | [codersdk.ChatContextResourceChangeStatus](#codersdkchatcontextresourcechangestatus) | false    |              |                                                                                                                                                                                                                                                           |
+
+## codersdk.ChatContextResourceChangeStatus
+
+```json
+"added"
+```
+
+### Properties
+
+#### Enumerated Values
+
+| Value(s)                       |
+|--------------------------------|
+| `added`, `modified`, `removed` |
+
+## codersdk.ChatContextResourceKind
+
+```json
+"instruction_file"
+```
+
+### Properties
+
+#### Enumerated Values
+
+| Value(s)                    |
+|-----------------------------|
+| `instruction_file`, `skill` |
 
 ## codersdk.ChatDiffContents
 
@@ -3778,9 +3916,29 @@ AuthorizationObject can represent a "set" of objects, such as: all workspaces in
     ],
     "client_type": "ui",
     "context": {
+      "changes": [
+        {
+          "kind": "instruction_file",
+          "new_content": "string",
+          "old_content": "string",
+          "skill_description": "string",
+          "skill_name": "string",
+          "source": "string",
+          "status": "added"
+        }
+      ],
       "dirty": true,
       "dirty_since": "2019-08-24T14:15:22Z",
-      "error": "string"
+      "error": "string",
+      "resources": [
+        {
+          "kind": "instruction_file",
+          "size_bytes": 0,
+          "skill_description": "string",
+          "skill_name": "string",
+          "source": "string"
+        }
+      ]
     },
     "created_at": "2019-08-24T14:15:22Z",
     "diff_status": {
