@@ -47,12 +47,24 @@ var errInvalidCursor = xerrors.New("invalid pagination cursor")
 // check_constraint.go.
 const userAIBudgetOverridesMustBeGroupMemberConstraint database.CheckConstraint = "user_ai_budget_overrides_must_be_group_member"
 
-// aibridgeHandler handles all aibridged-related endpoints.
+// aibridgeHandler handles all aibridged-related endpoints under /api/v2/aibridge.
 func aibridgeHandler(api *API, middlewares ...func(http.Handler) http.Handler) func(r chi.Router) {
+	return aiGatewayRoutes(api, "/api/v2/aibridge", middlewares...)
+}
+
+// aiGatewayHTTPHandler handles all aibridged-related endpoints under /api/v2/ai-gateway.
+func aiGatewayHTTPHandler(api *API, middlewares ...func(http.Handler) http.Handler) func(r chi.Router) {
+	return aiGatewayRoutes(api, "/api/v2/ai-gateway", middlewares...)
+}
+
+// aiGatewayRoutes builds the route tree for AI Gateway endpoints.
+// The stripPrefix parameter is the URL prefix to strip before forwarding
+// to the raw in-memory handler.
+func aiGatewayRoutes(api *API, stripPrefix string, middlewares ...func(http.Handler) http.Handler) func(r chi.Router) {
 	// Build the overload protection middleware chain for the aibridged handler.
 	// These limits are applied per-replica.
 	bridgeCfg := api.DeploymentValues.AI.BridgeConfig
-	concurrencyLimiter := httpmw.ConcurrencyLimit(bridgeCfg.MaxConcurrency.Value(), "AI Bridge")
+	concurrencyLimiter := httpmw.ConcurrencyLimit(bridgeCfg.MaxConcurrency.Value(), "AI Gateway")
 	rateLimiter := httpmw.RateLimitByAuthToken(int(bridgeCfg.RateLimit.Value()), aiBridgeRateLimitWindow)
 
 	return func(r chi.Router) {
@@ -72,7 +84,8 @@ func aibridgeHandler(api *API, middlewares ...func(http.Handler) http.Handler) f
 			// This is a bit funky but since aibridge only exposes a HTTP
 			// handler, this is how it has to be.
 			r.HandleFunc("/*", func(rw http.ResponseWriter, r *http.Request) {
-				if api.AGPL.GetAIBridgedHandler() == nil {
+				raw := api.AGPL.GetAIGatewayHandler()
+				if raw == nil {
 					httpapi.Write(r.Context(), rw, http.StatusNotFound, codersdk.Response{
 						Message: "aibridged handler not mounted",
 					})
@@ -89,7 +102,8 @@ func aibridgeHandler(api *API, middlewares ...func(http.Handler) http.Handler) f
 					return
 				}
 
-				api.AGPL.GetAIBridgedHandler().ServeHTTP(rw, r)
+				// Strip the prefix and relay to the raw aibridged handler.
+				http.StripPrefix(stripPrefix, raw).ServeHTTP(rw, r)
 			})
 		})
 	}
@@ -203,7 +217,7 @@ func (api *API) aiBridgeListSessions(rw http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error getting AI Bridge sessions.",
+			Message: "Internal error getting AI Gateway sessions.",
 			Detail:  err.Error(),
 		})
 		return
@@ -446,7 +460,7 @@ func (api *API) aiBridgeListModels(rw http.ResponseWriter, r *http.Request) {
 
 	if len(errs) > 0 {
 		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-			Message:     "Invalid AI Bridge models search query.",
+			Message:     "Invalid AI Gateway models search query.",
 			Validations: errs,
 		})
 		return
@@ -455,7 +469,7 @@ func (api *API) aiBridgeListModels(rw http.ResponseWriter, r *http.Request) {
 	models, err := api.Database.ListAIBridgeModels(ctx, filter)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error getting AI Bridge models.",
+			Message: "Internal error getting AI Gateway models.",
 			Detail:  err.Error(),
 		})
 		return
@@ -498,7 +512,7 @@ func (api *API) aiBridgeListClients(rw http.ResponseWriter, r *http.Request) {
 
 	if len(errs) > 0 {
 		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-			Message:     "Invalid AI Bridge clients search query.",
+			Message:     "Invalid AI Gateway clients search query.",
 			Validations: errs,
 		})
 		return
@@ -507,7 +521,7 @@ func (api *API) aiBridgeListClients(rw http.ResponseWriter, r *http.Request) {
 	clients, err := api.Database.ListAIBridgeClients(ctx, filter)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error getting AI Bridge clients.",
+			Message: "Internal error getting AI Gateway clients.",
 			Detail:  err.Error(),
 		})
 		return

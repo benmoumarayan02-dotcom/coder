@@ -73,7 +73,7 @@ func TestTransportFactory_TransportFor(t *testing.T) {
 		require.NoError(t, err)
 		defer resp.Body.Close()
 
-		require.Equal(t, "/api/v2/aibridge/my-anthropic/v1/messages", <-got)
+		require.Equal(t, "/api/v2/ai-gateway/my-anthropic/v1/messages", <-got)
 		require.Equal(t, origPath, req.URL.Path,
 			"caller's request URL must not be mutated by RoundTrip")
 	})
