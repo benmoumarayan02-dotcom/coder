@@ -18,11 +18,19 @@ import (
 // the reader forward compatible as new body fields are added to the proto.
 var contextBodyUnmarshalOptions = protojson.UnmarshalOptions{DiscardUnknown: true}
 
+// agentWorkingDir returns the agent's working directory, preferring the
+// expanded (tilde and env resolved) form and falling back to the raw value.
+func agentWorkingDir(agent database.WorkspaceAgent) string {
+	if agent.ExpandedDirectory != "" {
+		return agent.ExpandedDirectory
+	}
+	return agent.Directory
+}
+
 // pinnedWorkspaceContext builds the system-prompt instruction block and
 // workspace skills from the chat's pinned context resources
 // (chat_context_resources), the per-chat copy populated at hydrate and
-// refresh time. It is the first production reader of that copy, gated behind
-// ExperimentChatContextPin.
+// refresh time. It is gated behind ExperimentChatContextPin.
 //
 // ok reports whether the caller should use the returned values instead of
 // the per-turn, history-derived path. It is false when the experiment is off
@@ -51,11 +59,17 @@ func (server *Server) pinnedWorkspaceContext(
 		return "", nil, false, nil
 	}
 
-	directory := agent.ExpandedDirectory
-	if directory == "" {
-		directory = agent.Directory
+	instruction, skills, malformed := contextResourcesToPrompt(resources, agent.OperatingSystem, agentWorkingDir(agent))
+	if malformed > 0 {
+		// A status-OK resource whose body cannot be decoded means the pin
+		// hydrated content that is now unreadable; surface it so a proto
+		// or encoding regression does not silently drop context.
+		server.logger.Warn(ctx, "skipped malformed pinned chat context resources",
+			slog.F("chat_id", chat.ID),
+			slog.F("malformed_count", malformed),
+			slog.F("resource_count", len(resources)),
+		)
 	}
-	instruction, skills = contextResourcesToPrompt(resources, agent.OperatingSystem, directory)
 	server.logger.Debug(ctx, "built prompt context from pinned chat resources",
 		slog.F("chat_id", chat.ID),
 		slog.F("resource_count", len(resources)),
@@ -73,13 +87,14 @@ func (server *Server) pinnedWorkspaceContext(
 // operatingSystem and directory annotate the instruction header and are
 // omitted when empty. Only OK resources contribute; non-OK statuses, unknown
 // body kinds (mcp_config, mcp_server, and the reserved kinds), and malformed
-// bodies are skipped. The instruction header is emitted only when at least
-// one instruction file has content, so a skill-only pin produces no
-// instruction block, matching the per-turn path.
+// bodies are skipped. malformed counts OK resources whose body failed to
+// decode so the caller can surface an otherwise silent drop. The instruction
+// header is emitted only when at least one instruction file has content, so a
+// skill-only pin produces no instruction block, matching the per-turn path.
 func contextResourcesToPrompt(
 	resources []database.ChatContextResource,
 	operatingSystem, directory string,
-) (instruction string, skills []chattool.SkillMeta) {
+) (instruction string, skills []chattool.SkillMeta, malformed int) {
 	var contextFileParts []codersdk.ChatMessagePart
 	for _, r := range resources {
 		if r.Status != database.WorkspaceAgentContextResourceStatusOk {
@@ -89,6 +104,7 @@ func contextResourcesToPrompt(
 		case database.WorkspaceAgentContextBodyKindInstructionFile:
 			var body agentproto.InstructionFileBody
 			if err := contextBodyUnmarshalOptions.Unmarshal(r.Body, &body); err != nil {
+				malformed++
 				continue
 			}
 			content := SanitizePromptText(string(body.GetContent()))
@@ -103,14 +119,17 @@ func contextResourcesToPrompt(
 		case database.WorkspaceAgentContextBodyKindSkill:
 			var body agentproto.SkillMetaBody
 			if err := contextBodyUnmarshalOptions.Unmarshal(r.Body, &body); err != nil {
+				malformed++
 				continue
 			}
 			if body.GetName() == "" {
 				continue
 			}
 			// source is the skill directory. MetaFile is left empty so
-			// chattool falls back to DefaultSkillMetaFile ("SKILL.md"),
-			// matching the per-turn discovery path.
+			// chattool falls back to DefaultSkillMetaFile ("SKILL.md").
+			// SkillMetaBody carries no meta file name, so a non-default
+			// CODER_AGENT_EXP_SKILL_META_FILE is not preserved on this
+			// path, unlike the per-turn discovery path.
 			skills = append(skills, chattool.SkillMeta{
 				Name:        body.GetName(),
 				Description: body.GetDescription(),
@@ -120,7 +139,7 @@ func contextResourcesToPrompt(
 	}
 
 	if len(contextFileParts) == 0 {
-		return "", skills
+		return "", skills, malformed
 	}
-	return formatSystemInstructions(operatingSystem, directory, contextFileParts), skills
+	return formatSystemInstructions(operatingSystem, directory, contextFileParts), skills, malformed
 }

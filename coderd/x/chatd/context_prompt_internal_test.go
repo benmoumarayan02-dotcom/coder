@@ -65,7 +65,7 @@ func TestContextResourcesToPrompt(t *testing.T) {
 		resources := []database.ChatContextResource{
 			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
 		}
-		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+		instruction, skills, _ := contextResourcesToPrompt(resources, "linux", "/home/coder")
 
 		require.Empty(t, skills)
 		require.Contains(t, instruction, "<workspace-context>")
@@ -82,7 +82,7 @@ func TestContextResourcesToPrompt(t *testing.T) {
 		resources := []database.ChatContextResource{
 			skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
 		}
-		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+		instruction, skills, _ := contextResourcesToPrompt(resources, "linux", "/home/coder")
 
 		// Skill-only pins emit no instruction header.
 		require.Empty(t, instruction)
@@ -101,7 +101,7 @@ func TestContextResourcesToPrompt(t *testing.T) {
 			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusInvalid),
 			skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOversize),
 		}
-		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+		instruction, skills, _ := contextResourcesToPrompt(resources, "linux", "/home/coder")
 
 		require.Empty(t, instruction)
 		require.Empty(t, skills)
@@ -124,7 +124,7 @@ func TestContextResourcesToPrompt(t *testing.T) {
 				Status:   database.WorkspaceAgentContextResourceStatusOk,
 			},
 		}
-		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+		instruction, skills, _ := contextResourcesToPrompt(resources, "linux", "/home/coder")
 
 		require.Empty(t, instruction)
 		require.Empty(t, skills)
@@ -142,18 +142,39 @@ func TestContextResourcesToPrompt(t *testing.T) {
 			},
 			instructionResource(t, "/home/coder/CLAUDE.md", "good content", database.WorkspaceAgentContextResourceStatusOk),
 		}
-		instruction, skills := contextResourcesToPrompt(resources, "linux", "/home/coder")
+		instruction, skills, malformed := contextResourcesToPrompt(resources, "linux", "/home/coder")
 
 		require.Empty(t, skills)
+		require.Equal(t, 1, malformed)
 		require.NotContains(t, instruction, "/home/coder/AGENTS.md")
 		require.Contains(t, instruction, "Source: /home/coder/CLAUDE.md")
 		require.Contains(t, instruction, "good content")
 	})
 
+	t.Run("SkipsMalformedSkillBody", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			{
+				Source:   "/home/coder/.coder/skills/broken",
+				BodyKind: database.WorkspaceAgentContextBodyKindSkill,
+				Body:     json.RawMessage(`{not valid json`),
+				Status:   database.WorkspaceAgentContextResourceStatusOk,
+			},
+			skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
+		}
+		instruction, skills, malformed := contextResourcesToPrompt(resources, "linux", "/home/coder")
+
+		require.Empty(t, instruction)
+		require.Equal(t, 1, malformed)
+		require.Len(t, skills, 1)
+		require.Equal(t, "deploy", skills[0].Name)
+	})
+
 	t.Run("EmptyInput", func(t *testing.T) {
 		t.Parallel()
 
-		instruction, skills := contextResourcesToPrompt(nil, "linux", "/home/coder")
+		instruction, skills, _ := contextResourcesToPrompt(nil, "linux", "/home/coder")
 		require.Empty(t, instruction)
 		require.Empty(t, skills)
 	})
@@ -164,7 +185,7 @@ func TestContextResourcesToPrompt(t *testing.T) {
 		resources := []database.ChatContextResource{
 			instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
 		}
-		instruction, _ := contextResourcesToPrompt(resources, "", "")
+		instruction, _, _ := contextResourcesToPrompt(resources, "", "")
 
 		require.Contains(t, instruction, "<workspace-context>")
 		require.Contains(t, instruction, "Source: /home/coder/AGENTS.md")
@@ -313,13 +334,12 @@ func TestPinnedWorkspaceContextFromHydratedPin(t *testing.T) {
 		OrganizationID: org.ID,
 		CompletedAt:    sql.NullTime{Valid: true, Time: dbtime.Now()},
 	})
-	build := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+	dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
 		WorkspaceID:       ws.ID,
 		TemplateVersionID: tv.ID,
 		JobID:             pj.ID,
 		Transition:        database.WorkspaceTransitionStart,
 	})
-	_ = build
 	res := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
 		Transition: database.WorkspaceTransitionStart,
 		JobID:      pj.ID,
