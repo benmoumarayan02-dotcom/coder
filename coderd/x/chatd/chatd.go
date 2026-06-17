@@ -4719,7 +4719,10 @@ func (p *Server) fetchWorkspaceContext(
 		return nil, nil, nil, false
 	}
 
-	directory := agentWorkingDir(loadedAgent)
+	directory := loadedAgent.ExpandedDirectory
+	if directory == "" {
+		directory = loadedAgent.Directory
+	}
 
 	// Fetch context configuration from the agent. Parts
 	// arrive pre-populated with context-file and skill entries
@@ -4817,7 +4820,10 @@ func (p *Server) persistInstructionFiles(
 			}
 		}
 	}
-	directory := agentWorkingDir(*agent)
+	directory := agent.ExpandedDirectory
+	if directory == "" {
+		directory = agent.Directory
+	}
 
 	contextAPIKeyID, _ := aibridge.DelegatedAPIKeyIDFromContext(ctx)
 	if !hasContent {

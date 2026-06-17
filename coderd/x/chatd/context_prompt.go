@@ -18,15 +18,6 @@ import (
 // the reader forward compatible as new body fields are added to the proto.
 var contextBodyUnmarshalOptions = protojson.UnmarshalOptions{DiscardUnknown: true}
 
-// agentWorkingDir returns the agent's working directory, preferring the
-// expanded (tilde and env resolved) form and falling back to the raw value.
-func agentWorkingDir(agent database.WorkspaceAgent) string {
-	if agent.ExpandedDirectory != "" {
-		return agent.ExpandedDirectory
-	}
-	return agent.Directory
-}
-
 // pinnedWorkspaceContext builds the system-prompt instruction block and
 // workspace skills from the chat's pinned context resources
 // (chat_context_resources), populated at hydrate and refresh time.
@@ -55,7 +46,11 @@ func (server *Server) pinnedWorkspaceContext(
 		return "", nil, false, nil
 	}
 
-	instruction, skills, malformed := contextResourcesToPrompt(resources, agent.OperatingSystem, agentWorkingDir(agent))
+	directory := agent.ExpandedDirectory
+	if directory == "" {
+		directory = agent.Directory
+	}
+	instruction, skills, malformed := contextResourcesToPrompt(resources, agent.OperatingSystem, directory)
 	if malformed > 0 {
 		// A status-OK resource whose body cannot be decoded means the pin
 		// hydrated content that is now unreadable; surface it so a proto
