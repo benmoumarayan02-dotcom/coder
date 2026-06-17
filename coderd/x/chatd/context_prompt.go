@@ -104,9 +104,9 @@ func (server *Server) resolveTurnWorkspaceContext(
 	}
 
 	// History fallback: re-derive the instruction and skills from the
-	// context-file and skill parts the per-turn pull persisted. The skill
-	// scan is skipped unless context files are present, matching the pinned
-	// path that supplies instruction and skills together.
+	// context-file and skill parts the per-turn pull persisted. Skills are
+	// included only when context files are present; the pinned path resolves
+	// them independently.
 	if _, found := contextFileAgentID(promptRows); found {
 		return instructionFromContextFiles(promptRows), skillsFromParts(promptRows), nil
 	}

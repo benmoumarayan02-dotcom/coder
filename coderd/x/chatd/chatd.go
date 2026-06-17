@@ -3304,9 +3304,7 @@ type Config struct {
 	Clock                          quartz.Clock
 	AIBridgeTransportFactory       *atomic.Pointer[aibridge.TransportFactory]
 	AIGatewayRoutingEnabled        bool
-	// Experiments are the deployment's enabled experiments. Used to
-	// gate experimental chat behavior such as the pinned workspace
-	// context prompt path.
+	// Experiments may be nil. It is read-only after New copies it.
 	Experiments codersdk.Experiments
 
 	PrometheusRegistry prometheus.Registerer
