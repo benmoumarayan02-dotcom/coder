@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sqlc-dev/pqtype"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"golang.org/x/xerrors"
@@ -195,21 +196,19 @@ func TestContextResourcesToPrompt(t *testing.T) {
 	})
 }
 
+var pinExperimentEnabled = codersdk.Experiments{codersdk.ExperimentChatContextPin}
+
+func newPinServer(t *testing.T, db database.Store, experiments codersdk.Experiments) *Server {
+	t.Helper()
+	return &Server{
+		db:          db,
+		logger:      slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug),
+		experiments: experiments,
+	}
+}
+
 func TestPinnedWorkspaceContext(t *testing.T) {
 	t.Parallel()
-
-	newServer := func(t *testing.T, db database.Store, enabled bool) *Server {
-		t.Helper()
-		var experiments codersdk.Experiments
-		if enabled {
-			experiments = codersdk.Experiments{codersdk.ExperimentChatContextPin}
-		}
-		return &Server{
-			db:          db,
-			logger:      slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug),
-			experiments: experiments,
-		}
-	}
 
 	t.Run("ExperimentDisabled", func(t *testing.T) {
 		t.Parallel()
@@ -218,7 +217,7 @@ func TestPinnedWorkspaceContext(t *testing.T) {
 		db := dbmock.NewMockStore(ctrl)
 		// No ListChatContextResourcesByChatID expectation: the gate must
 		// short-circuit before touching the database.
-		server := newServer(t, db, false)
+		server := newPinServer(t, db, nil)
 
 		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: uuid.New()}, database.WorkspaceAgent{})
 		require.NoError(t, err)
@@ -235,7 +234,7 @@ func TestPinnedWorkspaceContext(t *testing.T) {
 		chatID := uuid.New()
 		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
 			Return(nil, xerrors.New("boom"))
-		server := newServer(t, db, true)
+		server := newPinServer(t, db, pinExperimentEnabled)
 
 		_, _, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, database.WorkspaceAgent{})
 		require.Error(t, err)
@@ -250,7 +249,7 @@ func TestPinnedWorkspaceContext(t *testing.T) {
 		chatID := uuid.New()
 		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chatID).
 			Return([]database.ChatContextResource{}, nil)
-		server := newServer(t, db, true)
+		server := newPinServer(t, db, pinExperimentEnabled)
 
 		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, database.WorkspaceAgent{})
 		require.NoError(t, err)
@@ -270,7 +269,7 @@ func TestPinnedWorkspaceContext(t *testing.T) {
 				instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
 				skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
 			}, nil)
-		server := newServer(t, db, true)
+		server := newPinServer(t, db, pinExperimentEnabled)
 
 		agent := database.WorkspaceAgent{OperatingSystem: "linux", ExpandedDirectory: "/home/coder"}
 		instruction, skills, ok, err := server.pinnedWorkspaceContext(context.Background(), database.Chat{ID: chatID}, agent)
@@ -293,7 +292,7 @@ func TestPinnedWorkspaceContext(t *testing.T) {
 			Return([]database.ChatContextResource{
 				instructionResource(t, "/home/coder/AGENTS.md", "be helpful", database.WorkspaceAgentContextResourceStatusOk),
 			}, nil)
-		server := newServer(t, db, true)
+		server := newPinServer(t, db, pinExperimentEnabled)
 
 		// Zero-value agent: the pin still resolves, just without the
 		// OS/directory header.
@@ -400,4 +399,120 @@ func TestPinnedWorkspaceContextFromHydratedPin(t *testing.T) {
 	_, _, ok, err = serverOff.pinnedWorkspaceContext(ctx, chat, agent)
 	require.NoError(t, err)
 	require.False(t, ok)
+}
+
+func historyContextMessage(t *testing.T, agentID uuid.UUID) database.ChatMessage {
+	t.Helper()
+	parts := []codersdk.ChatMessagePart{
+		{
+			Type:                 codersdk.ChatMessagePartTypeContextFile,
+			ContextFileAgentID:   uuid.NullUUID{UUID: agentID, Valid: true},
+			ContextFilePath:      "/home/coder/AGENTS.md",
+			ContextFileContent:   "history content",
+			ContextFileOS:        "linux",
+			ContextFileDirectory: "/home/coder",
+		},
+		{
+			Type:               codersdk.ChatMessagePartTypeSkill,
+			ContextFileAgentID: uuid.NullUUID{UUID: agentID, Valid: true},
+			SkillName:          "history-skill",
+			SkillDescription:   "from history",
+		},
+	}
+	raw, err := json.Marshal(parts)
+	require.NoError(t, err)
+	return database.ChatMessage{Content: pqtype.NullRawMessage{RawMessage: raw, Valid: true}}
+}
+
+// TestResolveTurnWorkspaceContext covers the dispatch that prepareGeneration
+// wires up: pinned copy when the experiment is on and rows exist, otherwise
+// the per-turn history-derived parts, and nothing for a non-workspace chat.
+func TestResolveTurnWorkspaceContext(t *testing.T) {
+	t.Parallel()
+
+	workspaceChat := func() database.Chat {
+		return database.Chat{ID: uuid.New(), WorkspaceID: uuid.NullUUID{UUID: uuid.New(), Valid: true}}
+	}
+
+	t.Run("NonWorkspaceChatYieldsNothing", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		server := newPinServer(t, db, pinExperimentEnabled)
+
+		instruction, skills, err := server.resolveTurnWorkspaceContext(context.Background(), database.Chat{ID: uuid.New()}, database.WorkspaceAgent{}, nil)
+		require.NoError(t, err)
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("PinnedPathWins", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chat := workspaceChat()
+		agentID := uuid.New()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chat.ID).
+			Return([]database.ChatContextResource{
+				instructionResource(t, "/home/coder/AGENTS.md", "pinned content", database.WorkspaceAgentContextResourceStatusOk),
+				skillResource(t, "/home/coder/.coder/skills/deploy", "deploy", "Deploy the app", database.WorkspaceAgentContextResourceStatusOk),
+			}, nil)
+		server := newPinServer(t, db, pinExperimentEnabled)
+
+		// History rows are present too; the pinned path must take precedence.
+		promptRows := []database.ChatMessage{historyContextMessage(t, agentID)}
+		instruction, skills, err := server.resolveTurnWorkspaceContext(context.Background(), chat, database.WorkspaceAgent{OperatingSystem: "linux"}, promptRows)
+		require.NoError(t, err)
+		require.Contains(t, instruction, "pinned content")
+		require.NotContains(t, instruction, "history content")
+		require.Len(t, skills, 1)
+		require.Equal(t, "deploy", skills[0].Name)
+	})
+
+	t.Run("HistoryFallbackWhenExperimentOff", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		// Experiment off: pinnedWorkspaceContext short-circuits before any DB
+		// call, so no ListChatContextResourcesByChatID expectation is set.
+		server := newPinServer(t, db, nil)
+
+		agentID := uuid.New()
+		promptRows := []database.ChatMessage{historyContextMessage(t, agentID)}
+		instruction, skills, err := server.resolveTurnWorkspaceContext(context.Background(), workspaceChat(), database.WorkspaceAgent{}, promptRows)
+		require.NoError(t, err)
+		require.Contains(t, instruction, "history content")
+		require.Len(t, skills, 1)
+		require.Equal(t, "history-skill", skills[0].Name)
+	})
+
+	t.Run("NoContextWhenHistoryEmpty", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		server := newPinServer(t, db, nil)
+
+		instruction, skills, err := server.resolveTurnWorkspaceContext(context.Background(), workspaceChat(), database.WorkspaceAgent{}, nil)
+		require.NoError(t, err)
+		require.Empty(t, instruction)
+		require.Empty(t, skills)
+	})
+
+	t.Run("PropagatesPinReadError", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		db := dbmock.NewMockStore(ctrl)
+		chat := workspaceChat()
+		db.EXPECT().ListChatContextResourcesByChatID(gomock.Any(), chat.ID).
+			Return(nil, xerrors.New("boom"))
+		server := newPinServer(t, db, pinExperimentEnabled)
+
+		_, _, err := server.resolveTurnWorkspaceContext(context.Background(), chat, database.WorkspaceAgent{}, nil)
+		require.Error(t, err)
+	})
 }

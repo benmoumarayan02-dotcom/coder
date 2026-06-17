@@ -215,8 +215,6 @@ func (server *Server) prepareGeneration(
 		resolvedUserPrompt string
 	)
 
-	persistedSkills := skillsFromParts(promptRows)
-	hasContextFiles := false
 	if chat.WorkspaceID.Valid {
 		// Resolve the workspace agent so the chat row's AgentID and
 		// BuildID bindings are up to date before the chatworker
@@ -227,22 +225,11 @@ func (server *Server) prepareGeneration(
 		// history; only metadata is mutated here.
 		agent, _ := workspaceCtx.getWorkspaceAgent(ctx)
 
-		// When the chat-context-pin experiment is enabled and the chat
-		// has a pinned context copy, build the instruction and skills
-		// from that copy. The pinned and history paths are mutually
-		// exclusive: hasContextFiles stays false here so the history
-		// fallback below does not overwrite the pinned values.
-		pinnedInstruction, pinnedSkills, ok, pinErr := server.pinnedWorkspaceContext(ctx, chat, agent)
-		if pinErr != nil {
+		var resolveErr error
+		instruction, workspaceSkills, resolveErr = server.resolveTurnWorkspaceContext(ctx, chat, agent, promptRows)
+		if resolveErr != nil {
 			cleanup()
-			return generationPrepared{}, xerrors.Errorf("load pinned chat context: %w", pinErr)
-		}
-		if ok {
-			instruction = pinnedInstruction
-			workspaceSkills = pinnedSkills
-		} else {
-			_, found := contextFileAgentID(promptRows)
-			hasContextFiles = found
+			return generationPrepared{}, resolveErr
 		}
 	}
 
@@ -255,10 +242,6 @@ func (server *Server) prepareGeneration(
 		}
 		return nil
 	})
-	if hasContextFiles {
-		instruction = instructionFromContextFiles(promptRows)
-		workspaceSkills = persistedSkills
-	}
 	g2.Go(func() error {
 		personalSkills = server.fetchPersonalSkillMetadata(ctx, chat.OwnerID, logger)
 		return nil

@@ -79,6 +79,40 @@ func (server *Server) pinnedWorkspaceContext(
 	return instruction, skills, true, nil
 }
 
+// resolveTurnWorkspaceContext selects the instruction block and workspace
+// skills for a turn. It prefers the chat's pinned context copy (gated by
+// ExperimentChatContextPin) and falls back to the per-turn, history-derived
+// context-file and skill parts. The two paths are mutually exclusive. agent
+// is the chat's resolved workspace agent, used only to decorate the pinned
+// instruction header. A non-workspace chat yields no context.
+func (server *Server) resolveTurnWorkspaceContext(
+	ctx context.Context,
+	chat database.Chat,
+	agent database.WorkspaceAgent,
+	promptRows []database.ChatMessage,
+) (instruction string, skills []chattool.SkillMeta, err error) {
+	if !chat.WorkspaceID.Valid {
+		return "", nil, nil
+	}
+
+	pinnedInstruction, pinnedSkills, ok, err := server.pinnedWorkspaceContext(ctx, chat, agent)
+	if err != nil {
+		return "", nil, err
+	}
+	if ok {
+		return pinnedInstruction, pinnedSkills, nil
+	}
+
+	// History fallback: re-derive the instruction and skills from the
+	// context-file and skill parts the per-turn pull persisted. The skill
+	// scan is skipped unless context files are present, matching the pinned
+	// path that supplies instruction and skills together.
+	if _, found := contextFileAgentID(promptRows); found {
+		return instructionFromContextFiles(promptRows), skillsFromParts(promptRows), nil
+	}
+	return "", nil, nil
+}
+
 // contextResourcesToPrompt converts a chat's pinned context resources into
 // the formatted instruction block and workspace skill metadata for the
 // system prompt. It is the inverse of the protojson bodies written by the
