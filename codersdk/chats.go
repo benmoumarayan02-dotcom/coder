@@ -186,6 +186,8 @@ type ChatContextResourceKind string
 const (
 	ChatContextResourceKindInstructionFile ChatContextResourceKind = "instruction_file"
 	ChatContextResourceKindSkill           ChatContextResourceKind = "skill"
+	ChatContextResourceKindMCPConfig       ChatContextResourceKind = "mcp_config"
+	ChatContextResourceKindMCPServer       ChatContextResourceKind = "mcp_server"
 )
 
 // ChatContextResource is one pinned workspace-context resource the chat's

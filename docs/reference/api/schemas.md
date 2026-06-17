@@ -2490,9 +2490,9 @@ AuthorizationObject can represent a "set" of objects, such as: all workspaces in
 
 #### Enumerated Values
 
-| Value(s)                    |
-|-----------------------------|
-| `instruction_file`, `skill` |
+| Value(s)                                                |
+|---------------------------------------------------------|
+| `instruction_file`, `mcp_config`, `mcp_server`, `skill` |
 
 ## codersdk.ChatDiffContents
 

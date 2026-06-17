@@ -104,7 +104,7 @@ func TestPinnedContextResources(t *testing.T) {
 		}, out[1])
 	})
 
-	t.Run("SkipsNonOKEmptyAndUnknownKinds", func(t *testing.T) {
+	t.Run("SkipsNonOKAndEmpty", func(t *testing.T) {
 		t.Parallel()
 
 		resources := []database.ChatContextResource{
@@ -114,14 +114,46 @@ func TestPinnedContextResources(t *testing.T) {
 			instructionResource(t, "/b/AGENTS.md", "", database.WorkspaceAgentContextResourceStatusOk),
 			// OK skill with no name.
 			skillResource(t, "/c/skills/x", "", "no name", database.WorkspaceAgentContextResourceStatusOk),
-			// Unknown (non-prompt) kind.
+			// Non-OK MCP config.
 			{
-				Source:   ".mcp.json",
+				Source:   "/d/.mcp.json",
 				BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig,
-				Status:   database.WorkspaceAgentContextResourceStatusOk,
+				Status:   database.WorkspaceAgentContextResourceStatusUnreadable,
 			},
 		}
 		require.Empty(t, pinnedContextResources(resources))
+	})
+
+	t.Run("IncludesMCPConfigAndServer", func(t *testing.T) {
+		t.Parallel()
+
+		resources := []database.ChatContextResource{
+			{
+				Source:    "/home/coder/.mcp.json",
+				BodyKind:  database.WorkspaceAgentContextBodyKindMcpConfig,
+				Status:    database.WorkspaceAgentContextResourceStatusOk,
+				SizeBytes: 670,
+			},
+			{
+				Source:    "github",
+				BodyKind:  database.WorkspaceAgentContextBodyKindMcpServer,
+				Status:    database.WorkspaceAgentContextResourceStatusOk,
+				SizeBytes: 12,
+			},
+		}
+		out := pinnedContextResources(resources)
+		require.Equal(t, []codersdk.ChatContextResource{
+			{
+				Source:    "/home/coder/.mcp.json",
+				Kind:      codersdk.ChatContextResourceKindMCPConfig,
+				SizeBytes: 670,
+			},
+			{
+				Source:    "github",
+				Kind:      codersdk.ChatContextResourceKindMCPServer,
+				SizeBytes: 12,
+			},
+		}, out)
 	})
 }
 
@@ -209,16 +241,22 @@ func TestDiffContextResources(t *testing.T) {
 		}, changes[2])
 	})
 
-	t.Run("SkipsNonPromptKinds", func(t *testing.T) {
+	t.Run("IncludesMCPChanges", func(t *testing.T) {
 		t.Parallel()
 
 		pinned := []database.ChatContextResource{
-			{Source: ".mcp.json", BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig, ContentHash: contentHash("old")},
+			{Source: "/p/.mcp.json", BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig, ContentHash: contentHash("old")},
 		}
 		snapshot := []database.WorkspaceAgentContextResource{
-			{Source: ".mcp.json", BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig, ContentHash: contentHash("new")},
+			{Source: "/p/.mcp.json", BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig, ContentHash: contentHash("new")},
 		}
-		require.Empty(t, diffContextResources(pinned, snapshot))
+		changes := diffContextResources(pinned, snapshot)
+		// MCP changes carry only source, kind, and status (no body diff).
+		require.Equal(t, []codersdk.ChatContextResourceChange{{
+			Source: "/p/.mcp.json",
+			Kind:   codersdk.ChatContextResourceKindMCPConfig,
+			Status: codersdk.ChatContextResourceChangeStatusModified,
+		}}, changes)
 	})
 
 	t.Run("SanitizesAndCapsContent", func(t *testing.T) {

@@ -1,4 +1,4 @@
-import { FileIcon, TriangleAlertIcon, ZapIcon } from "lucide-react";
+import { FileIcon, PlugIcon, TriangleAlertIcon, ZapIcon } from "lucide-react";
 import { type FC, useRef, useState } from "react";
 import type { ChatContext, ChatMessagePart } from "#/api/typesGenerated";
 import { Button } from "#/components/Button/Button";
@@ -45,6 +45,10 @@ type ContextFileItem = { readonly path: string; readonly truncated?: boolean };
 type ContextSkillItem = {
 	readonly name: string;
 	readonly description?: string;
+};
+type ContextMcpItem = {
+	readonly name: string;
+	readonly source: string;
 };
 
 const hasFiniteTokenValue = (value: number | undefined): value is number =>
@@ -181,7 +185,30 @@ export const ContextUsageIndicator: FC<{
 		// Drop entries with no usable name so an empty skill marker never renders
 		// as a blank row.
 		.filter((skill) => skill.name.trim().length > 0);
-	const hasContextList = fileItems.length > 0 || skillItems.length > 0;
+	// MCP configs/servers are only ever surfaced from the chat's pinned
+	// resources; there is no injected-context fallback for them. An MCP server's
+	// source is its server name, while an MCP config's source is its file path.
+	const mcpItems: readonly ContextMcpItem[] = (
+		usePinned
+			? (pinnedResources ?? [])
+					.filter(
+						(resource) =>
+							resource.kind === "mcp_config" || resource.kind === "mcp_server",
+					)
+					.map((resource) => ({
+						name:
+							resource.kind === "mcp_server"
+								? resource.source
+								: getPathBasename(resource.source),
+						source: resource.source,
+					}))
+			: []
+	)
+		// Drop entries with no usable name so an empty MCP marker never renders as
+		// a blank row.
+		.filter((mcp) => mcp.name.trim().length > 0);
+	const hasContextList =
+		fileItems.length > 0 || skillItems.length > 0 || mcpItems.length > 0;
 
 	const ariaLabel = hasPercent
 		? `Context usage ${percentLabel}. ${formatTokenCount(usedTokens)} of ${formatTokenCount(contextLimitTokens)} tokens used.${isDirty ? " Context changed." : ""}`
@@ -263,6 +290,19 @@ export const ContextUsageIndicator: FC<{
 									);
 								})}
 							</TooltipProvider>
+						</div>
+					)}
+					{mcpItems.length > 0 && (
+						<div className="flex flex-col gap-1">
+							<span className="font-medium text-content-primary">MCP</span>
+							{mcpItems.map((mcp) => (
+								<div key={mcp.source} className="flex items-center gap-1.5">
+									<PlugIcon className="size-3 shrink-0" />
+									<span className="truncate" title={mcp.source}>
+										{mcp.name}
+									</span>
+								</div>
+							))}
 						</div>
 					)}
 				</div>

@@ -25,9 +25,8 @@ const maxContextChangeContentBytes = 64 * 1024
 // pushed snapshot. It is read-only and intended for the single-chat GET
 // handler; list and watch payloads omit this detail to stay lightweight.
 //
-// resources mirrors the prompt-injection rules so it equals the context the
-// model actually sees: OK instruction files with non-empty content and OK
-// skills with a name. changes is nil unless the chat is dirty (and has a
+// resources lists the chat's full pinned inventory (instruction files, skills,
+// and MCP configs/servers); changes is nil unless the chat is dirty (and has a
 // resolvable agent), so the second read is only paid for when it can differ.
 func (server *Server) ContextDetail(
 	ctx context.Context,
@@ -56,11 +55,11 @@ func (server *Server) ContextDetail(
 }
 
 // pinnedContextResources converts a chat's pinned context rows into the
-// metadata-only resource list reported on the chat. It applies the same
-// inclusion rules as contextResourcesToPrompt so the list equals the context
-// the prompt is built from: OK instruction files with non-empty (sanitized)
-// content and OK skills with a name. Other kinds and statuses are skipped.
-// Input order (source ASC from the query) is preserved.
+// metadata-only resource list reported on the chat. It surfaces the full
+// pinned inventory the user can act on: OK instruction files with non-empty
+// (sanitized) content, OK skills with a name, and OK MCP configs/servers.
+// Non-OK rows and empty instruction files are skipped. Input order (source ASC
+// from the query) is preserved.
 func pinnedContextResources(resources []database.ChatContextResource) []codersdk.ChatContextResource {
 	var out []codersdk.ChatContextResource
 	for _, r := range resources {
@@ -89,6 +88,18 @@ func pinnedContextResources(resources []database.ChatContextResource) []codersdk
 				SizeBytes:        r.SizeBytes,
 				SkillName:        body.GetName(),
 				SkillDescription: body.GetDescription(),
+			})
+		case database.WorkspaceAgentContextBodyKindMcpConfig:
+			out = append(out, codersdk.ChatContextResource{
+				Source:    r.Source,
+				Kind:      codersdk.ChatContextResourceKindMCPConfig,
+				SizeBytes: r.SizeBytes,
+			})
+		case database.WorkspaceAgentContextBodyKindMcpServer:
+			out = append(out, codersdk.ChatContextResource{
+				Source:    r.Source,
+				Kind:      codersdk.ChatContextResourceKindMCPServer,
+				SizeBytes: r.SizeBytes,
 			})
 		}
 	}
@@ -156,10 +167,10 @@ func diffContextResources(
 
 // buildResourceChange assembles a change entry for one source. The reported
 // kind comes from the side that exists now (snapshot for added/modified,
-// pinned for removed); ok is false when that side is not a prompt kind, so
-// unrelated resource kinds (e.g. MCP config) are skipped. Instruction-file
-// changes carry the sanitized, capped bodies of whichever sides are present;
-// skill changes carry the identifying name and description.
+// pinned for removed); ok is false only for kinds chatd does not track. An
+// instruction-file change carries the sanitized, capped bodies of whichever
+// sides are present; a skill change carries the identifying name and
+// description; MCP config/server changes carry only source, kind, and status.
 func buildResourceChange(
 	source string,
 	status codersdk.ChatContextResourceChangeStatus,
@@ -169,7 +180,7 @@ func buildResourceChange(
 	if current == nil {
 		current = pinned
 	}
-	kind, ok := promptResourceKind(current.kind)
+	kind, ok := contextResourceKind(current.kind)
 	if !ok {
 		return codersdk.ChatContextResourceChange{}, false
 	}
@@ -202,15 +213,20 @@ func buildResourceChange(
 	return change, true
 }
 
-// promptResourceKind maps a database body kind to the codersdk kind reported
-// on the chat, reporting ok=false for kinds that do not contribute to the
-// prompt (and so are not surfaced as context resources or changes).
-func promptResourceKind(kind database.WorkspaceAgentContextBodyKind) (codersdk.ChatContextResourceKind, bool) {
+// contextResourceKind maps a database body kind to the codersdk kind reported
+// on the chat. ok is false only for kinds chatd does not track yet (the
+// reserved plugin/hook/subagent/command kinds), which are omitted from the
+// resource list and change set.
+func contextResourceKind(kind database.WorkspaceAgentContextBodyKind) (codersdk.ChatContextResourceKind, bool) {
 	switch kind {
 	case database.WorkspaceAgentContextBodyKindInstructionFile:
 		return codersdk.ChatContextResourceKindInstructionFile, true
 	case database.WorkspaceAgentContextBodyKindSkill:
 		return codersdk.ChatContextResourceKindSkill, true
+	case database.WorkspaceAgentContextBodyKindMcpConfig:
+		return codersdk.ChatContextResourceKindMCPConfig, true
+	case database.WorkspaceAgentContextBodyKindMcpServer:
+		return codersdk.ChatContextResourceKindMCPServer, true
 	default:
 		return "", false
 	}
