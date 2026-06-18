@@ -94,34 +94,56 @@ func TestPinnedContextResources(t *testing.T) {
 			Source:    "/home/coder/AGENTS.md",
 			Kind:      codersdk.ChatContextResourceKindInstructionFile,
 			SizeBytes: 10,
+			Status:    codersdk.ChatContextResourceStatusOK,
 		}, out[0])
 
 		require.Equal(t, codersdk.ChatContextResource{
 			Source:           "/home/coder/.coder/skills/deploy",
 			Kind:             codersdk.ChatContextResourceKindSkill,
+			Status:           codersdk.ChatContextResourceStatusOK,
 			SkillName:        "deploy",
 			SkillDescription: "Deploy the app",
 		}, out[1])
 	})
 
-	t.Run("SkipsNonOKAndEmpty", func(t *testing.T) {
+	t.Run("SkipsOKButEmpty", func(t *testing.T) {
 		t.Parallel()
 
 		resources := []database.ChatContextResource{
-			// Non-OK instruction file.
-			instructionResource(t, "/a/AGENTS.md", "ignored", database.WorkspaceAgentContextResourceStatusOversize),
 			// OK instruction file with empty content.
 			instructionResource(t, "/b/AGENTS.md", "", database.WorkspaceAgentContextResourceStatusOk),
 			// OK skill with no name.
 			skillResource(t, "/c/skills/x", "", "no name", database.WorkspaceAgentContextResourceStatusOk),
-			// Non-OK MCP config.
-			{
-				Source:   "/d/.mcp.json",
-				BodyKind: database.WorkspaceAgentContextBodyKindMcpConfig,
-				Status:   database.WorkspaceAgentContextResourceStatusUnreadable,
-			},
 		}
 		require.Empty(t, pinnedContextResources(resources))
+	})
+
+	t.Run("IncludesNonOKWithError", func(t *testing.T) {
+		t.Parallel()
+
+		oversize := instructionResource(t, "/a/AGENTS.md", "ignored", database.WorkspaceAgentContextResourceStatusOversize)
+		oversize.SizeBytes = 999
+		oversize.Error = "file size exceeds cap"
+		invalidSkill := skillResource(t, "/c/skills/moo", "", "", database.WorkspaceAgentContextResourceStatusInvalid)
+		invalidSkill.Error = `front-matter name "x" does not match directory "moo"`
+		resources := []database.ChatContextResource{oversize, invalidSkill}
+
+		out := pinnedContextResources(resources)
+		require.Equal(t, []codersdk.ChatContextResource{
+			{
+				Source:    "/a/AGENTS.md",
+				Kind:      codersdk.ChatContextResourceKindInstructionFile,
+				SizeBytes: 999,
+				Status:    codersdk.ChatContextResourceStatusOversize,
+				Error:     "file size exceeds cap",
+			},
+			{
+				Source: "/c/skills/moo",
+				Kind:   codersdk.ChatContextResourceKindSkill,
+				Status: codersdk.ChatContextResourceStatusInvalid,
+				Error:  `front-matter name "x" does not match directory "moo"`,
+			},
+		}, out)
 	})
 
 	t.Run("IncludesMCPConfigAndServer", func(t *testing.T) {
@@ -155,11 +177,13 @@ func TestPinnedContextResources(t *testing.T) {
 				Source:    "/home/coder/.mcp.json",
 				Kind:      codersdk.ChatContextResourceKindMCPConfig,
 				SizeBytes: 670,
+				Status:    codersdk.ChatContextResourceStatusOK,
 			},
 			{
 				Source:    "github",
 				Kind:      codersdk.ChatContextResourceKindMCPServer,
 				SizeBytes: 12,
+				Status:    codersdk.ChatContextResourceStatusOK,
 				// Tool names are reported with the "github__" prefix stripped.
 				McpTools: []codersdk.ChatContextMCPTool{
 					{Name: "create", Description: "Create an issue"},

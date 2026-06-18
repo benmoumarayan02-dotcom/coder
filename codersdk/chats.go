@@ -207,7 +207,27 @@ type ChatContextResource struct {
 	// McpTools lists the tools exposed by an MCP server. Populated only for
 	// the mcp_server kind; nil otherwise.
 	McpTools []ChatContextMCPTool `json:"mcp_tools,omitempty"`
+	// Status is the resource's health. Non-ok resources (invalid, unreadable,
+	// oversize, excluded) are still reported so the UI can surface why a
+	// resource was dropped from the prompt instead of silently omitting it;
+	// their body-specific fields (skill name, MCP tools) are empty.
+	Status ChatContextResourceStatus `json:"status"`
+	// Error explains a non-ok Status; empty when healthy. May also carry a
+	// non-fatal warning when Status is ok.
+	Error string `json:"error,omitempty"`
 }
+
+// ChatContextResourceStatus is the health of a pinned context resource,
+// mirroring the agent resolver's per-resource status.
+type ChatContextResourceStatus string
+
+const (
+	ChatContextResourceStatusOK         ChatContextResourceStatus = "ok"
+	ChatContextResourceStatusOversize   ChatContextResourceStatus = "oversize"
+	ChatContextResourceStatusUnreadable ChatContextResourceStatus = "unreadable"
+	ChatContextResourceStatusInvalid    ChatContextResourceStatus = "invalid"
+	ChatContextResourceStatusExcluded   ChatContextResourceStatus = "excluded"
+)
 
 // ChatContextMCPTool is one tool exposed by a pinned MCP server, reported on
 // the single-chat GET response. Metadata only; the input schema is omitted.

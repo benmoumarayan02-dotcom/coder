@@ -56,50 +56,75 @@ func (server *Server) ContextDetail(
 
 // pinnedContextResources converts a chat's pinned context rows into the
 // metadata-only resource list reported on the chat. It surfaces the full
-// pinned inventory the user can act on: OK instruction files with non-empty
-// (sanitized) content, OK skills with a name, and OK MCP configs/servers.
-// Non-OK rows and empty instruction files are skipped. Input order (source ASC
+// pinned inventory the user can act on, each stamped with its Status:
+//
+//   - OK instruction files with non-empty (sanitized) content, OK skills with
+//     a name, and OK MCP configs/servers (mcp_server carries its tools).
+//   - Non-OK rows (invalid, unreadable, oversize, excluded) of a tracked kind,
+//     carrying Status and Error so the UI can explain why the resource was
+//     dropped from the prompt instead of silently omitting it. Their
+//     body-specific fields are empty.
+//
+// OK-but-empty instruction files, OK skills with no name, and untracked kinds
+// (reserved plugin/hook/subagent/command) are skipped. Input order (source ASC
 // from the query) is preserved.
 func pinnedContextResources(resources []database.ChatContextResource) []codersdk.ChatContextResource {
 	var out []codersdk.ChatContextResource
 	for _, r := range resources {
+		kind, ok := contextResourceKind(r.BodyKind)
+		if !ok {
+			continue
+		}
 		if r.Status != database.WorkspaceAgentContextResourceStatusOk {
+			// Surface the failure (with its reason) rather than dropping it
+			// silently; the body is empty for non-OK rows.
+			out = append(out, codersdk.ChatContextResource{
+				Source:    r.Source,
+				Kind:      kind,
+				SizeBytes: r.SizeBytes,
+				Status:    codersdk.ChatContextResourceStatus(r.Status),
+				Error:     r.Error,
+			})
 			continue
 		}
 		switch r.BodyKind {
 		case database.WorkspaceAgentContextBodyKindInstructionFile:
-			body, ok := decodeInstructionFileBody(r.Body)
-			if !ok || SanitizePromptText(string(body.GetContent())) == "" {
+			body, decoded := decodeInstructionFileBody(r.Body)
+			if !decoded || SanitizePromptText(string(body.GetContent())) == "" {
 				continue
 			}
 			out = append(out, codersdk.ChatContextResource{
 				Source:    r.Source,
-				Kind:      codersdk.ChatContextResourceKindInstructionFile,
+				Kind:      kind,
 				SizeBytes: r.SizeBytes,
+				Status:    codersdk.ChatContextResourceStatusOK,
 			})
 		case database.WorkspaceAgentContextBodyKindSkill:
-			body, ok := decodeSkillMetaBody(r.Body)
-			if !ok || body.GetName() == "" {
+			body, decoded := decodeSkillMetaBody(r.Body)
+			if !decoded || body.GetName() == "" {
 				continue
 			}
 			out = append(out, codersdk.ChatContextResource{
 				Source:           r.Source,
-				Kind:             codersdk.ChatContextResourceKindSkill,
+				Kind:             kind,
 				SizeBytes:        r.SizeBytes,
+				Status:           codersdk.ChatContextResourceStatusOK,
 				SkillName:        body.GetName(),
 				SkillDescription: body.GetDescription(),
 			})
 		case database.WorkspaceAgentContextBodyKindMcpConfig:
 			out = append(out, codersdk.ChatContextResource{
 				Source:    r.Source,
-				Kind:      codersdk.ChatContextResourceKindMCPConfig,
+				Kind:      kind,
 				SizeBytes: r.SizeBytes,
+				Status:    codersdk.ChatContextResourceStatusOK,
 			})
 		case database.WorkspaceAgentContextBodyKindMcpServer:
 			out = append(out, codersdk.ChatContextResource{
 				Source:    r.Source,
-				Kind:      codersdk.ChatContextResourceKindMCPServer,
+				Kind:      kind,
 				SizeBytes: r.SizeBytes,
+				Status:    codersdk.ChatContextResourceStatusOK,
 				McpTools:  mcpToolsFromServerBody(r.Source, r.Body),
 			})
 		}
