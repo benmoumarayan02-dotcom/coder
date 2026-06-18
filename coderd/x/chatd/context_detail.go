@@ -100,6 +100,7 @@ func pinnedContextResources(resources []database.ChatContextResource) []codersdk
 				Source:    r.Source,
 				Kind:      codersdk.ChatContextResourceKindMCPServer,
 				SizeBytes: r.SizeBytes,
+				McpTools:  mcpToolsFromServerBody(r.Source, r.Body),
 			})
 		}
 	}

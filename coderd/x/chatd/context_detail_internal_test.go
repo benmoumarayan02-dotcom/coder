@@ -139,6 +139,14 @@ func TestPinnedContextResources(t *testing.T) {
 				BodyKind:  database.WorkspaceAgentContextBodyKindMcpServer,
 				Status:    database.WorkspaceAgentContextResourceStatusOk,
 				SizeBytes: 12,
+				// Tool names carry the "<server>__" prefix the agent adds.
+				Body: mustMarshalContextBody(t, &agentproto.MCPServerBody{
+					ServerName: "github",
+					Tools: []*agentproto.MCPTool{
+						{Name: "github__create", Description: "Create an issue"},
+						{Name: "github__search", Description: "Search code"},
+					},
+				}),
 			},
 		}
 		out := pinnedContextResources(resources)
@@ -152,6 +160,11 @@ func TestPinnedContextResources(t *testing.T) {
 				Source:    "github",
 				Kind:      codersdk.ChatContextResourceKindMCPServer,
 				SizeBytes: 12,
+				// Tool names are reported with the "github__" prefix stripped.
+				McpTools: []codersdk.ChatContextMCPTool{
+					{Name: "create", Description: "Create an issue"},
+					{Name: "search", Description: "Search code"},
+				},
 			},
 		}, out)
 	})

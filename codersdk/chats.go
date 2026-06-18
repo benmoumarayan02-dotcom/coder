@@ -195,7 +195,8 @@ const (
 // only on the single-chat GET response.
 type ChatContextResource struct {
 	// Source is the resource locator: the canonical file path for an
-	// instruction file, or the skill directory for a skill.
+	// instruction file, the skill directory for a skill, the file path for
+	// an MCP config, or the server name for an MCP server.
 	Source string                  `json:"source"`
 	Kind   ChatContextResourceKind `json:"kind"`
 	// SizeBytes is the original payload size in bytes.
@@ -203,6 +204,19 @@ type ChatContextResource struct {
 	// SkillName and SkillDescription are populated only for skill kinds.
 	SkillName        string `json:"skill_name,omitempty"`
 	SkillDescription string `json:"skill_description,omitempty"`
+	// McpTools lists the tools exposed by an MCP server. Populated only for
+	// the mcp_server kind; nil otherwise.
+	McpTools []ChatContextMCPTool `json:"mcp_tools,omitempty"`
+}
+
+// ChatContextMCPTool is one tool exposed by a pinned MCP server, reported on
+// the single-chat GET response. Metadata only; the input schema is omitted.
+type ChatContextMCPTool struct {
+	// Name is the tool name with the "<server>__" prefix the agent adds
+	// stripped, so it reads as the server exposes it.
+	Name string `json:"name"`
+	// Description is the tool's human-readable summary; may be empty.
+	Description string `json:"description,omitempty"`
 }
 
 // ChatContextResourceChangeStatus classifies how a source differs between the

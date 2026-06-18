@@ -3,6 +3,7 @@ package chatd
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"golang.org/x/xerrors"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -38,6 +39,37 @@ func decodeSkillMetaBody(body json.RawMessage) (*agentproto.SkillMetaBody, bool)
 		return nil, false
 	}
 	return &decoded, true
+}
+
+// mcpToolsFromServerBody decodes a stored mcp_server resource body and returns
+// its tool list for the chat response. The agent prefixes each tool name with
+// "<server>__"; that prefix is stripped so the name reads as the server
+// exposes it. Returns nil when the body has no tools or cannot be decoded.
+func mcpToolsFromServerBody(server string, body json.RawMessage) []codersdk.ChatContextMCPTool {
+	var decoded agentproto.MCPServerBody
+	if err := contextBodyUnmarshalOptions.Unmarshal(body, &decoded); err != nil {
+		return nil
+	}
+	tools := decoded.GetTools()
+	if len(tools) == 0 {
+		return nil
+	}
+	prefix := server + "__"
+	out := make([]codersdk.ChatContextMCPTool, 0, len(tools))
+	for _, t := range tools {
+		name := strings.TrimPrefix(t.GetName(), prefix)
+		if name == "" {
+			continue
+		}
+		out = append(out, codersdk.ChatContextMCPTool{
+			Name:        name,
+			Description: t.GetDescription(),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // pinnedWorkspaceContext builds the system-prompt instruction block and
