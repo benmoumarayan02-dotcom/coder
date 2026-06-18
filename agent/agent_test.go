@@ -68,6 +68,13 @@ func TestMain(m *testing.M) {
 		exit := runSubAgentMain()
 		os.Exit(exit)
 	}
+	if os.Getenv("TEST_MCP_FAKE_SERVER") == "1" {
+		// Re-exec'd by the workspace MCP manager as a fake stdio MCP
+		// server. Serve the minimal protocol and exit before the test
+		// framework (and goleak) run.
+		runFakeMCPServer()
+		os.Exit(0)
+	}
 	goleak.VerifyTestMain(m, testutil.GoleakOptions...)
 }
 
