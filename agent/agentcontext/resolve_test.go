@@ -428,6 +428,61 @@ func TestResolver_MCPProviderResources(t *testing.T) {
 	require.Equal(t, "GitHub MCP server", got.Description)
 }
 
+// TestResolver_MCPExcludedFromAggregateHash verifies MCP resources are
+// surfaced in the snapshot but do not contribute to the drift hash. MCP
+// servers connect asynchronously after agent startup and their tools are
+// discovered live at turn time, so a server connecting (or changing its
+// tools) must not dirty an already-hydrated chat. Pinned content
+// (instruction files, skills) still drives the hash.
+func TestResolver_MCPExcludedFromAggregateHash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "AGENTS.md"), "# Project rules\n\nDo the thing.")
+	roots := []agentcontext.ScanRoot{{Path: dir}}
+
+	mcpRes := func(payload string) agentcontext.Resource {
+		return agentcontext.Resource{
+			ID:          "mcp_server:github",
+			Kind:        agentcontext.KindMCPServer,
+			Source:      "github",
+			Status:      agentcontext.StatusOK,
+			Payload:     []byte(payload),
+			ContentHash: sha256.Sum256([]byte(payload)),
+			Description: "GitHub MCP server",
+		}
+	}
+
+	// No MCP servers connected yet (the moment right after startup).
+	noMCP := (&agentcontext.Resolver{}).Resolve(roots)
+	// A server has connected and contributes a resource.
+	withMCP := (&agentcontext.Resolver{
+		MCP: &fakeMCPProvider{resources: []agentcontext.Resource{mcpRes("tools-v1")}},
+	}).Resolve(roots)
+	// The same server later re-resolves with a different tool list.
+	withMCPChanged := (&agentcontext.Resolver{
+		MCP: &fakeMCPProvider{resources: []agentcontext.Resource{mcpRes("tools-v2-added-a-tool")}},
+	}).Resolve(roots)
+
+	// The MCP resource is still surfaced for display.
+	gotMCP := findResource(t, withMCP.Resources, agentcontext.KindMCPServer, "github")
+	require.Equal(t, "GitHub MCP server", gotMCP.Description)
+
+	// A server connecting (and later changing its tools) must not change the
+	// drift hash: it is identical with no MCP, with MCP, and with different
+	// MCP tools.
+	require.Equal(t, noMCP.AggregateHash, withMCP.AggregateHash,
+		"MCP server connecting must not change the drift hash")
+	require.Equal(t, withMCP.AggregateHash, withMCPChanged.AggregateHash,
+		"MCP tool changes must not change the drift hash")
+
+	// Sanity: instruction file content still drives the hash (same path,
+	// different content).
+	mustWriteFile(t, filepath.Join(dir, "AGENTS.md"), "# Different rules\n")
+	changed := (&agentcontext.Resolver{}).Resolve(roots)
+	require.NotEqual(t, noMCP.AggregateHash, changed.AggregateHash,
+		"instruction file content must still drive the drift hash")
+}
+
 // TestResolver_MCPProviderRespectsAggregateByteCap guards the
 // contract that a single oversized MCP payload cannot blow past
 // MaxSnapshotBytes with StatusOK.
