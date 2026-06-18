@@ -1555,8 +1555,18 @@ func (a *agent) handleManifest(manifestOK *checkpoint) func(ctx context.Context,
 				// This runs inside the tracked goroutine so it
 				// is properly awaited on shutdown.
 				a.mcpManager.MarkStartupSettled()
-				if mcpErr := a.mcpManager.Reload(a.gracefulCtx, a.contextConfigAPI.MCPConfigFiles()); mcpErr != nil {
-					a.logger.Warn(ctx, "failed to reload workspace MCP servers", slog.Error(mcpErr))
+				// Keep the MCP manager's connected servers in sync
+				// with the .mcp.json files the context resolver
+				// discovers: the manifest working directory plus any
+				// context sources added at runtime. A .mcp.json that
+				// lives in an added source (not the working dir)
+				// would otherwise never be connected. Sources can be
+				// added after startup, so this watches for the agent's
+				// lifetime in its own tracked goroutine.
+				if mcpErr := a.trackGoroutine(func() {
+					a.syncMCPServersFromContext(a.gracefulCtx)
+				}); mcpErr != nil {
+					a.logger.Warn(ctx, "failed to start workspace MCP context sync", slog.Error(mcpErr))
 				}
 			})
 			if err != nil {
@@ -1565,6 +1575,76 @@ func (a *agent) handleManifest(manifestOK *checkpoint) func(ctx context.Context,
 		}
 		return nil
 	}
+}
+
+// syncMCPServersFromContext keeps the MCP manager's connected servers
+// in sync with the .mcp.json files the context resolver discovers. The
+// resolver scans the manifest working directory, built-in roots, and any
+// context sources added at runtime, so a .mcp.json contributed by an
+// added source (rather than living in the working directory) is
+// connected too. It reloads on every context-snapshot change, deduping
+// by the discovered path set so unrelated snapshot churn (e.g. MCP tool
+// updates, which also bump the snapshot) does not cause reload churn.
+func (a *agent) syncMCPServersFromContext(ctx context.Context) {
+	changes, unsubscribe := a.contextManager.SubscribeChanges()
+	defer unsubscribe()
+
+	// The statically configured MCP paths (manifest working directory
+	// plus CODER_AGENT_EXP_MCP_CONFIG_FILES) are stable for the agent's
+	// lifetime once startup has settled, so resolve them once.
+	configured := a.contextConfigAPI.MCPConfigFiles()
+
+	var last []string
+	reload := func() {
+		paths := mcpConfigPaths(configured, a.contextManager.Snapshot())
+		if slices.Equal(paths, last) {
+			return
+		}
+		last = paths
+		if err := a.mcpManager.Reload(ctx, paths); err != nil {
+			a.logger.Warn(ctx, "failed to reload workspace MCP servers", slog.Error(err))
+		}
+	}
+
+	// Pick up any sources discovered before we subscribed.
+	reload()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-changes:
+			reload()
+		}
+	}
+}
+
+// mcpConfigPaths unions the statically configured MCP config files with
+// the .mcp.json files the resolver discovered in the snapshot (working
+// directory, built-in roots, and runtime-managed context sources) and
+// returns a sorted, deduplicated list. The union keeps legacy
+// manifest-directory discovery working while also connecting servers
+// declared in .mcp.json files contributed by added context sources.
+func mcpConfigPaths(configured []string, snap agentcontext.Snapshot) []string {
+	seen := make(map[string]struct{}, len(configured)+len(snap.Resources))
+	add := func(p string) {
+		if p != "" {
+			seen[p] = struct{}{}
+		}
+	}
+	for _, p := range configured {
+		add(p)
+	}
+	for _, r := range snap.Resources {
+		if r.Kind == agentcontext.KindMCPConfig {
+			add(r.Source)
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 func (a *agent) createDevcontainer(

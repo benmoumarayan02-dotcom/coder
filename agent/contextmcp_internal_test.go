@@ -159,3 +159,44 @@ func TestBuildMCPServerResources(t *testing.T) {
 		require.Equal(t, agentcontext.StatusOK, got[1].Status)
 	})
 }
+
+func TestMCPConfigPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("OnlySnapshotSources", func(t *testing.T) {
+		t.Parallel()
+		// Regression for the case where the manifest working directory is
+		// empty (so the statically configured set is empty) but a
+		// .mcp.json was contributed by a context source added at runtime.
+		// The MCP manager must still be told about it.
+		got := mcpConfigPaths(nil, agentcontext.Snapshot{Resources: []agentcontext.Resource{
+			{Kind: agentcontext.KindMCPConfig, Source: "/home/coder/test/.mcp.json"},
+		}})
+		require.Equal(t, []string{"/home/coder/test/.mcp.json"}, got)
+	})
+
+	t.Run("UnionSortedDeduped", func(t *testing.T) {
+		t.Parallel()
+		snap := agentcontext.Snapshot{Resources: []agentcontext.Resource{
+			{Kind: agentcontext.KindMCPConfig, Source: "/work/.mcp.json"},
+			{Kind: agentcontext.KindMCPConfig, Source: "/added/.mcp.json"},
+			// Same path as a configured entry: deduped.
+			{Kind: agentcontext.KindMCPConfig, Source: "/cfg/.mcp.json"},
+			// Other kinds and empty sources are ignored.
+			{Kind: agentcontext.KindInstructionFile, Source: "/work/AGENTS.md"},
+			{Kind: agentcontext.KindMCPServer, Source: "go-language-server"},
+			{Kind: agentcontext.KindMCPConfig, Source: ""},
+		}}
+		got := mcpConfigPaths([]string{"/cfg/.mcp.json", "/work/.mcp.json"}, snap)
+		require.Equal(t, []string{
+			"/added/.mcp.json",
+			"/cfg/.mcp.json",
+			"/work/.mcp.json",
+		}, got)
+	})
+
+	t.Run("Empty", func(t *testing.T) {
+		t.Parallel()
+		require.Empty(t, mcpConfigPaths(nil, agentcontext.Snapshot{}))
+	})
+}
