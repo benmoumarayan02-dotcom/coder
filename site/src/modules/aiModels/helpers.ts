@@ -1,6 +1,5 @@
 /**
- * Reads a value as a non-empty string, returning undefined for
- * empty strings, null, or undefined values.
+ * Returns undefined for non-strings, empty strings, and whitespace-only strings.
  */
 export function readOptionalString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -23,6 +22,7 @@ const canonicalProviderBaseURLs: Record<string, string> = {
 	vercel: "https://ai-gateway.vercel.sh/v1",
 };
 
+/** Returns the canonical base URL for a known provider, or "" if unrecognized. */
 export function getDefaultProviderBaseURL(provider: string): string {
 	return canonicalProviderBaseURLs[normalizeProvider(provider)] ?? "";
 }

@@ -8,6 +8,7 @@ import { formatProviderLabel } from "#/utils/aiProviders";
 
 /** Derived per-provider state for the AI Models admin UI. */
 export type ProviderState = {
+	/** Provider config UUID for DB entries, or normalized provider name for catalog/model-only entries. */
 	key: string;
 	provider: string;
 	label: string;
@@ -20,7 +21,7 @@ export type ProviderState = {
 	hasCatalogAPIKey: boolean;
 	/** Managed-or-catalog union that gates model operations. */
 	hasEffectiveAPIKey: boolean;
-	/** Raw config flag (any source); not a manage gate — use canManageProviderModels. */
+	/** Raw config flag (any source); not a manage gate; use canManageProviderModels. */
 	allowUserAPIKey: boolean;
 	isEnvPreset: boolean;
 	baseURL: string;
@@ -223,7 +224,11 @@ export const canManageProviderModels = (
 	);
 };
 
-/** Resolves a model config to its provider-state key (prefers ai_provider_id). */
+/**
+ * Resolves a model config to its provider-state key. Prefers ai_provider_id
+ * when set. Falls back to the sole matching provider state; returns "" when
+ * multiple states match (model cannot be unambiguously assigned).
+ */
 export const resolveModelProviderKey = (
 	modelConfig: TypesGen.ChatModelConfig,
 	providerStates: readonly ProviderState[],
