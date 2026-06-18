@@ -2666,7 +2666,28 @@ func (api *API) refreshChatContext(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpapi.Write(ctx, rw, http.StatusOK, db2sdk.Chat(updated, nil, nil))
+	sdkChat := db2sdk.Chat(updated, nil, nil)
+
+	// Enrich the context summary with the freshly pinned resources (and any
+	// change set) so the client reflects the refresh immediately, without a
+	// full reload. This mirrors getChat; we pass the re-pinned chat so the
+	// detail reflects the post-refresh state (dirty marker cleared, so
+	// changes is nil). A failure here is non-fatal: the refresh already
+	// succeeded, so we log and return the rest of the response.
+	if sdkChat.Context != nil && api.chatDaemon != nil {
+		resources, changes, err := api.chatDaemon.ContextDetail(ctx, updated)
+		if err != nil {
+			api.Logger.Error(ctx, "failed to compute chat context detail after refresh",
+				slog.F("chat_id", updated.ID),
+				slog.Error(err),
+			)
+		} else {
+			sdkChat.Context.Resources = resources
+			sdkChat.Context.Changes = changes
+		}
+	}
+
+	httpapi.Write(ctx, rw, http.StatusOK, sdkChat)
 }
 
 // patchChat updates a chat resource. Supports updating labels,
