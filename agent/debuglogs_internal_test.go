@@ -84,11 +84,15 @@ func TestRotatedAgentLogFilesReadsLogDirLiterally(t *testing.T) {
 	require.NoError(t, os.WriteFile(activePath, []byte("active log"), 0o600))
 	require.NoError(t, os.WriteFile(rotatedPath, []byte("rotated log"), 0o600))
 
-	files, err := rotatedAgentLogFiles(t.Context(), slogtest.Make(t, nil), logDir, time.Now().Add(-time.Minute))
+	dirRoot, err := os.OpenRoot(logDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dirRoot.Close() })
+
+	files, err := rotatedAgentLogFiles(t.Context(), slogtest.Make(t, nil), dirRoot, time.Now().Add(-time.Minute))
 
 	require.NoError(t, err)
 	require.Len(t, files, 1)
-	require.Equal(t, "coder-agent-2026-05-18T00-00-00.000.log", filepath.Base(files[0].path))
+	require.Equal(t, "coder-agent-2026-05-18T00-00-00.000.log", files[0].name)
 }
 
 type countingResponseWriter struct {

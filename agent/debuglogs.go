@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 )
 
 const (
+	activeAgentLogName        = "coder-agent.log"
 	debugLogsActiveMaxBytes   = 10 * 1024 * 1024
 	debugLogsCombinedMaxBytes = 100 * 1024 * 1024
 )
@@ -25,7 +27,7 @@ const (
 var coderAgentRotatedLogPattern = regexp.MustCompile(`^coder-agent-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}\.log$`)
 
 type agentLogFile struct {
-	path    string
+	name    string
 	modTime time.Time
 }
 
@@ -35,8 +37,19 @@ func (a *agent) HandleHTTPDebugLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Confine reads to logDir so a symlink there cannot escape it.
+	root, err := os.OpenRoot(a.logDir)
+	if err != nil {
+		a.logger.Error(r.Context(), "open agent log dir", slog.Error(err), slog.F("log_dir", a.logDir))
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, "could not open log dir: %s", err)
+		return
+	}
+	defer root.Close()
+
 	if !hasAfter {
-		a.writeActiveDebugLog(w, r)
+		a.writeActiveDebugLog(w, r, root)
 		return
 	}
 
@@ -45,10 +58,9 @@ func (a *agent) HandleHTTPDebugLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Open the required active log before the 200 so failures return 500.
-	activePath := filepath.Join(a.logDir, "coder-agent.log")
-	active, err := os.Open(activePath)
+	active, err := root.Open(activeAgentLogName)
 	if err != nil {
-		a.logger.Error(r.Context(), "open agent log file", slog.Error(err), slog.F("path", activePath))
+		a.logger.Error(r.Context(), "open agent log file", slog.Error(err), slog.F("name", activeAgentLogName))
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, "could not open log file: %s", err)
 		return
@@ -56,7 +68,7 @@ func (a *agent) HandleHTTPDebugLogs(w http.ResponseWriter, r *http.Request) {
 	activeInfo, err := active.Stat()
 	if err != nil {
 		_ = active.Close()
-		a.logger.Error(r.Context(), "stat agent log file", slog.Error(err), slog.F("path", activePath))
+		a.logger.Error(r.Context(), "stat agent log file", slog.Error(err), slog.F("name", activeAgentLogName))
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, "could not stat log file: %s", err)
 		return
@@ -66,12 +78,12 @@ func (a *agent) HandleHTTPDebugLogs(w http.ResponseWriter, r *http.Request) {
 	remaining, err = writeAgentLogSection(w, active, activeInfo.ModTime(), "", remaining)
 	_ = active.Close()
 	if err != nil {
-		a.logger.Error(r.Context(), "read agent log file", slog.Error(err), slog.F("path", activePath))
+		a.logger.Error(r.Context(), "read agent log file", slog.Error(err), slog.F("name", activeAgentLogName))
 		return
 	}
 
 	// Then rotated logs after the cutoff, newest first.
-	rotated, err := rotatedAgentLogFiles(r.Context(), a.logger, a.logDir, after)
+	rotated, err := rotatedAgentLogFiles(r.Context(), a.logger, root, after)
 	if err != nil {
 		a.logger.Error(r.Context(), "find rotated agent log files", slog.Error(err), slog.F("log_dir", a.logDir))
 		return
@@ -80,15 +92,15 @@ func (a *agent) HandleHTTPDebugLogs(w http.ResponseWriter, r *http.Request) {
 		if remaining <= 0 {
 			break
 		}
-		f, err := os.Open(file.path)
+		f, err := root.Open(file.name)
 		if err != nil {
-			a.logger.Warn(r.Context(), "open rotated agent log file", slog.Error(err), slog.F("path", file.path))
+			a.logger.Warn(r.Context(), "open rotated agent log file", slog.Error(err), slog.F("name", file.name))
 			continue
 		}
 		remaining, err = writeAgentLogSection(w, f, file.modTime, "\n", remaining)
 		_ = f.Close()
 		if err != nil {
-			a.logger.Error(r.Context(), "read rotated agent log file", slog.Error(err), slog.F("path", file.path))
+			a.logger.Error(r.Context(), "read rotated agent log file", slog.Error(err), slog.F("name", file.name))
 			return
 		}
 	}
@@ -109,11 +121,10 @@ func parseDebugLogsAfter(r *http.Request) (after time.Time, hasAfter bool, err e
 	return after, true, nil
 }
 
-func (a *agent) writeActiveDebugLog(w http.ResponseWriter, r *http.Request) {
-	logPath := filepath.Join(a.logDir, "coder-agent.log")
-	f, err := os.Open(logPath)
+func (a *agent) writeActiveDebugLog(w http.ResponseWriter, r *http.Request, root *os.Root) {
+	f, err := root.Open(activeAgentLogName)
 	if err != nil {
-		a.logger.Error(r.Context(), "open agent log file", slog.Error(err), slog.F("path", logPath))
+		a.logger.Error(r.Context(), "open agent log file", slog.Error(err), slog.F("name", activeAgentLogName))
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, "could not open log file: %s", err)
 		return
@@ -144,9 +155,9 @@ func writeAgentLogSection(w io.Writer, f *os.File, modTime time.Time, separator 
 }
 
 // rotatedAgentLogFiles returns rotated logs after the cutoff, newest first,
-// excluding the active log.
-func rotatedAgentLogFiles(ctx context.Context, logger slog.Logger, logDir string, after time.Time) ([]agentLogFile, error) {
-	entries, err := os.ReadDir(logDir)
+// excluding the active log and any non-regular files such as symlinks.
+func rotatedAgentLogFiles(ctx context.Context, logger slog.Logger, root *os.Root, after time.Time) ([]agentLogFile, error) {
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return nil, xerrors.Errorf("read log directory: %w", err)
 	}
@@ -156,17 +167,16 @@ func rotatedAgentLogFiles(ctx context.Context, logger slog.Logger, logDir string
 		if !coderAgentRotatedLogPattern.MatchString(base) {
 			continue
 		}
-		path := filepath.Join(logDir, base)
-		info, err := os.Stat(path)
+		info, err := entry.Info()
 		if err != nil {
-			logger.Warn(ctx, "stat rotated agent log file", slog.Error(err), slog.F("path", path))
+			logger.Warn(ctx, "stat rotated agent log file", slog.Error(err), slog.F("name", base))
 			continue
 		}
 		if !info.Mode().IsRegular() || info.ModTime().Before(after) {
 			continue
 		}
 		rotated = append(rotated, agentLogFile{
-			path:    path,
+			name:    base,
 			modTime: info.ModTime(),
 		})
 	}
