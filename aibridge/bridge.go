@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ import (
 	"github.com/coder/coder/v2/aibridge/provider"
 	"github.com/coder/coder/v2/aibridge/recorder"
 	"github.com/coder/coder/v2/aibridge/tracing"
+	agplaibridge "github.com/coder/coder/v2/coderd/aibridge"
 )
 
 const (
@@ -227,6 +229,12 @@ func newInterceptionProcessor(p provider.Provider, cbs *circuitbreaker.ProviderC
 		client := GuessClient(r)
 		sessionID := GuessSessionID(client, r)
 
+		// Read and strip Agent Firewall correlation headers before
+		// CreateInterceptor so the interceptor never sees them.
+		agentFirewallSessionID, agentFirewallSeqNumber := extractAgentFirewallHeaders(r, logger, ctx)
+		r.Header.Del(agplaibridge.HeaderAgentFirewallSessionID)
+		r.Header.Del(agplaibridge.HeaderAgentFirewallSequenceNumber)
+
 		interceptor, err := p.CreateInterceptor(w, r.WithContext(ctx), tracer)
 		if err != nil {
 			span.SetStatus(codes.Error, fmt.Sprintf("failed to create interceptor: %v", err))
@@ -272,18 +280,20 @@ func newInterceptionProcessor(p provider.Provider, cbs *circuitbreaker.ProviderC
 
 		cred := interceptor.Credential()
 		if err := rec.RecordInterception(ctx, &recorder.InterceptionRecord{
-			ID:                    interceptor.ID().String(),
-			InitiatorID:           actor.ID,
-			Metadata:              actor.Metadata,
-			Model:                 interceptor.Model(),
-			Provider:              p.Type(),
-			ProviderName:          p.Name(),
-			UserAgent:             r.UserAgent(),
-			Client:                string(client),
-			ClientSessionID:       sessionID,
-			CorrelatingToolCallID: interceptor.CorrelatingToolCallID(),
-			CredentialKind:        string(cred.Kind),
-			CredentialHint:        cred.Hint,
+			ID:                          interceptor.ID().String(),
+			InitiatorID:                 actor.ID,
+			Metadata:                    actor.Metadata,
+			Model:                       interceptor.Model(),
+			Provider:                    p.Type(),
+			ProviderName:                p.Name(),
+			UserAgent:                   r.UserAgent(),
+			Client:                      string(client),
+			ClientSessionID:             sessionID,
+			CorrelatingToolCallID:       interceptor.CorrelatingToolCallID(),
+			AgentFirewallSessionID:      agentFirewallSessionID,
+			AgentFirewallSequenceNumber: agentFirewallSeqNumber,
+			CredentialKind:              string(cred.Kind),
+			CredentialHint:              cred.Hint,
 		}); err != nil {
 			span.SetStatus(codes.Error, fmt.Sprintf("failed to record interception: %v", err))
 			logger.Warn(ctx, "failed to record interception", slog.Error(err))
@@ -439,4 +449,24 @@ func mergeContexts(base, other context.Context) context.Context {
 		}
 	}()
 	return ctx
+}
+
+// extractAgentFirewallHeaders reads and parses the Agent Firewall
+// correlation headers from the request. Returns nil pointers when the
+// headers are absent.
+func extractAgentFirewallHeaders(r *http.Request, logger slog.Logger, ctx context.Context) (sessionID *string, seqNumber *int32) {
+	if v := r.Header.Get(agplaibridge.HeaderAgentFirewallSessionID); v != "" {
+		sessionID = &v
+	}
+	if v := r.Header.Get(agplaibridge.HeaderAgentFirewallSequenceNumber); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil {
+			logger.Warn(ctx, "invalid agent firewall sequence number header",
+				slog.F("raw_value", v), slog.Error(err))
+		} else {
+			n32 := int32(n)
+			seqNumber = &n32
+		}
+	}
+	return sessionID, seqNumber
 }
