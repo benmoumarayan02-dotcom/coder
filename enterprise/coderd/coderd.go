@@ -1342,7 +1342,9 @@ func (api *API) runEntitlementsLoop(ctx context.Context) {
 		// the system will eventually recover as replicas timeout
 		// if their heartbeats stop. The best effort just tries to update the
 		// UI faster if it succeeds.
-		_ = api.Pubsub.Publish(PubsubEventLicenses, []byte("going away"))
+		// Uses ReplicaSyncPubsub (Postgres) to match the subscription below;
+		// license events must not depend on the NATS cluster mesh.
+		_ = api.ReplicaSyncPubsub.Publish(PubsubEventLicenses, []byte("going away"))
 	}()
 	for {
 		select {
@@ -1352,7 +1354,14 @@ func (api *API) runEntitlementsLoop(ctx context.Context) {
 			// pass
 		}
 		if !subscribed {
-			cancel, err := api.Pubsub.Subscribe(PubsubEventLicenses, func(_ context.Context, _ []byte) {
+			// License/entitlement propagation uses ReplicaSyncPubsub (always
+			// Postgres) rather than api.Pubsub. With the NATS pubsub experiment
+			// enabled, api.Pubsub is the embedded NATS pubsub whose cluster mesh
+			// only forms once a replica is HA-licensed; subscribing to license
+			// events there would be circular (a fresh replica could not learn
+			// about the license needed to join the mesh). PG pubsub is available
+			// as soon as the DB connection is, independent of clustering.
+			cancel, err := api.ReplicaSyncPubsub.Subscribe(PubsubEventLicenses, func(_ context.Context, _ []byte) {
 				// don't block.  If the channel is full, drop the event, as there is a resync
 				// scheduled already.
 				select {
