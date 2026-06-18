@@ -1,8 +1,10 @@
 package agentcontext
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/codersdk/workspacesdk"
 )
@@ -472,7 +476,44 @@ func (r *Resolver) readMCPConfig(scanRoot, path string, info fs.FileInfo, userSo
 		return res
 	}
 	res.ContentHash = sha256.Sum256(data)
+	// A .mcp.json with broken JSON yields no MCP servers at all; the
+	// agentmcp manager logs and skips it, so the failure is otherwise
+	// invisible. Flag structural problems here as StatusInvalid so the
+	// chat context surfaces them as an issue rather than silently
+	// dropping every server in the file.
+	if err := validateMCPConfig(data); err != nil {
+		res.Status = StatusInvalid
+		res.Error = err.Error()
+	}
 	return res
+}
+
+// validateMCPConfig performs lightweight structural validation of a
+// .mcp.json document so syntactically broken files surface as
+// StatusInvalid instead of silently producing no MCP servers. It is
+// deliberately self-contained and does not import the agentmcp
+// package: it only checks that the document is valid JSON shaped like
+// {"mcpServers": {<name>: {...}}}. Individual server fields
+// (command/url/env/...) are not validated here; the MCP manager owns
+// that when it connects. An absent or empty mcpServers map is valid.
+func validateMCPConfig(data []byte) error {
+	var shape struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return err
+	}
+	// Each server entry must be a JSON object; a scalar or array
+	// entry is a structural error the MCP manager would reject.
+	// The top-level Unmarshal above already rejects malformed JSON,
+	// so a well-formed value starting with '{' is a complete object.
+	for name, raw := range shape.MCPServers {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return xerrors.Errorf("server %q must be a JSON object", name)
+		}
+	}
+	return nil
 }
 
 // readFileResource is the shared plumbing for kinds whose only

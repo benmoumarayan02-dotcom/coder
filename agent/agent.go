@@ -513,10 +513,10 @@ func (a *agent) init() {
 		Clock:          a.clock,
 		WorkingDir:     workingDirFn,
 		InitialSources: initialContextSources(a.contextConfig, workingDirFn),
-		// Surface live MCP servers (and their tools) in the
-		// snapshot by reading the MCP manager's cached tool list
-		// on every resolve.
-		MCP: mcpContextProvider{cachedTools: a.mcpManager.CachedTools},
+		// Surface live MCP servers (their tools, and any that
+		// failed to connect) in the snapshot by reading the MCP
+		// manager's per-server health on every resolve.
+		MCP: mcpContextProvider{cachedServers: a.mcpManager.CachedServers},
 	})
 	// Re-resolve the context snapshot whenever the MCP tool set
 	// changes (e.g. a .mcp.json edit reconnects servers) so MCP

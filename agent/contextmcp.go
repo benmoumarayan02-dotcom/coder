@@ -9,55 +9,79 @@ import (
 	"strings"
 
 	"github.com/coder/coder/v2/agent/agentcontext"
+	"github.com/coder/coder/v2/agent/x/agentmcp"
 	"github.com/coder/coder/v2/codersdk/workspacesdk"
 )
 
 // mcpContextProvider adapts the agent's MCP manager to the
-// agentcontext.MCPProvider seam. It reads the manager's cached tool
-// list (never blocking) and groups it into one KindMCPServer resource
-// per server, so live MCP servers and their tools appear in the
-// workspace-context snapshot alongside instruction files and skills.
+// agentcontext.MCPProvider seam. It reads the manager's per-server
+// health snapshot (never blocking) and turns each server into one
+// KindMCPServer resource, so live MCP servers and their tools appear
+// in the workspace-context snapshot alongside instruction files and
+// skills. Servers that failed to connect surface as non-OK resources
+// so they are no longer silently dropped.
 type mcpContextProvider struct {
-	// cachedTools returns the current MCP tool cache without blocking.
-	// It is *agentmcp.Manager.CachedTools in production.
-	cachedTools func() []workspacesdk.MCPToolInfo
+	// cachedServers returns the current per-server MCP snapshot
+	// without blocking. It is *agentmcp.Manager.CachedServers in
+	// production.
+	cachedServers func() []agentmcp.ServerStatus
 }
 
 // MCPResources implements agentcontext.MCPProvider. It must never block;
 // the resolver calls it on every re-resolve.
 func (p mcpContextProvider) MCPResources() []agentcontext.Resource {
-	if p.cachedTools == nil {
+	if p.cachedServers == nil {
 		return nil
 	}
-	return buildMCPServerResources(p.cachedTools())
+	return buildMCPServerResources(p.cachedServers())
 }
 
-// buildMCPServerResources groups a flat MCP tool list by server name and
-// returns one KindMCPServer resource per server. Servers are emitted in
-// name order, and tools within a server in name order, so the resource ID
-// list and content hashes are deterministic across resolves. Only servers
-// that expose at least one tool are surfaced; a server's .mcp.json entry
-// still appears separately as a KindMCPConfig resource.
-func buildMCPServerResources(tools []workspacesdk.MCPToolInfo) []agentcontext.Resource {
-	if len(tools) == 0 {
+// buildMCPServerResources turns a per-server MCP snapshot into one
+// KindMCPServer resource per server. Servers are emitted in name order,
+// and tools within a server in name order, so the resource ID list and
+// content hashes are deterministic across resolves.
+//
+// A connected server that exposes at least one tool becomes a
+// StatusOK resource carrying its tools. A server that failed to connect
+// becomes a StatusUnreadable resource carrying the connection error, so
+// it appears in the snapshot's issues instead of vanishing. A connected
+// server with no tools yet is skipped until its tools arrive (a later
+// re-resolve, driven by onToolsChanged, surfaces it). A server's
+// .mcp.json entry still appears separately as a KindMCPConfig resource.
+func buildMCPServerResources(servers []agentmcp.ServerStatus) []agentcontext.Resource {
+	if len(servers) == 0 {
 		return nil
 	}
-	byServer := make(map[string][]workspacesdk.MCPToolInfo)
-	for _, t := range tools {
-		if t.ServerName == "" {
+	sorted := slices.Clone(servers)
+	slices.SortFunc(sorted, func(a, b agentmcp.ServerStatus) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	resources := make([]agentcontext.Resource, 0, len(sorted))
+	for _, s := range sorted {
+		if s.Name == "" {
 			continue
 		}
-		byServer[t.ServerName] = append(byServer[t.ServerName], t)
-	}
-	servers := make([]string, 0, len(byServer))
-	for name := range byServer {
-		servers = append(servers, name)
-	}
-	slices.Sort(servers)
-
-	resources := make([]agentcontext.Resource, 0, len(servers))
-	for _, server := range servers {
-		serverTools := byServer[server]
+		if !s.Connected {
+			errMsg := s.Err
+			if errMsg == "" {
+				errMsg = "failed to connect"
+			}
+			resources = append(resources, agentcontext.Resource{
+				ID:          resourceID(agentcontext.KindMCPServer, s.Name),
+				Kind:        agentcontext.KindMCPServer,
+				Source:      s.Name,
+				Name:        s.Name,
+				Status:      agentcontext.StatusUnreadable,
+				Error:       errMsg,
+				ContentHash: hashMCPServerError(s.Name, errMsg),
+			})
+			continue
+		}
+		if len(s.Tools) == 0 {
+			continue
+		}
+		serverTools := slices.Clone(s.Tools)
 		slices.SortFunc(serverTools, func(a, b workspacesdk.MCPToolInfo) int {
 			return strings.Compare(a.Name, b.Name)
 		})
@@ -70,14 +94,17 @@ func buildMCPServerResources(tools []workspacesdk.MCPToolInfo) []agentcontext.Re
 			})
 		}
 		resources = append(resources, agentcontext.Resource{
-			ID:          resourceID(agentcontext.KindMCPServer, server),
+			ID:          resourceID(agentcontext.KindMCPServer, s.Name),
 			Kind:        agentcontext.KindMCPServer,
-			Source:      server,
-			Name:        server,
+			Source:      s.Name,
+			Name:        s.Name,
 			Status:      agentcontext.StatusOK,
-			ContentHash: hashMCPServer(server, converted),
+			ContentHash: hashMCPServer(s.Name, converted),
 			Tools:       converted,
 		})
+	}
+	if len(resources) == 0 {
+		return nil
 	}
 	return resources
 }
@@ -105,6 +132,21 @@ func hashMCPServer(server string, tools []agentcontext.MCPTool) [32]byte {
 			}
 		}
 	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// hashMCPServerError produces a deterministic content hash for a
+// failed-to-connect server. The "unreadable" discriminator keeps a
+// failed server's hash distinct from an OK server's, so a server that
+// transitions between connected and failed (or whose error text
+// changes) flips the aggregate hash and re-pins dirty chats.
+func hashMCPServerError(server, errMsg string) [32]byte {
+	h := sha256.New()
+	writeHashField(h, "unreadable")
+	writeHashField(h, server)
+	writeHashField(h, errMsg)
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 	return sum

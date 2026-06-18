@@ -135,6 +135,33 @@ type Manager struct {
 	// track the live tool set. Guarded by m.mu; nil until set
 	// via SetOnToolsChanged.
 	onToolsChanged func()
+
+	// serverHealth records, per configured server name, whether the
+	// last reload connected it and the connect error otherwise. It
+	// is rebuilt at the end of every reload and read (joined with
+	// the tool cache) by CachedServers so failed-to-connect servers
+	// surface in the workspace-context snapshot instead of vanishing.
+	// Guarded by m.mu.
+	serverHealth map[string]serverHealthEntry
+}
+
+// serverHealthEntry is the per-server connection outcome recorded
+// after a reload. err is non-empty only when connected is false.
+type serverHealthEntry struct {
+	connected bool
+	err       string
+}
+
+// ServerStatus is a non-blocking snapshot of a single configured MCP
+// server's connection health and current tool set, suitable for
+// surfacing in the workspace-context UI. Connected servers carry their
+// Tools (possibly empty before the first tool list arrives); servers
+// that failed to connect carry a non-empty Err and no Tools.
+type ServerStatus struct {
+	Name      string
+	Connected bool
+	Err       string
+	Tools     []workspacesdk.MCPToolInfo
 }
 
 // serverEntry pairs a server config with its connected client.
@@ -162,6 +189,7 @@ func NewManager(
 		execer:         execer,
 		updateEnv:      updateEnv,
 		servers:        make(map[string]*serverEntry),
+		serverHealth:   make(map[string]serverHealthEntry),
 		snapshot:       make(map[string]fileSnapshot),
 		startupSettled: make(chan struct{}),
 		closedCh:       make(chan struct{}),
@@ -526,12 +554,18 @@ func (m *Manager) doReload(ctx context.Context, mcpConfigFiles []string) error {
 		return err
 	}
 
-	connected := m.connectAll(ctx, diff.toConnect)
+	connected, failedConnects := m.connectAll(ctx, diff.toConnect)
 
 	replaced, err := m.installServers(wanted, diff, connected, snap)
 	if err != nil {
 		return err
 	}
+
+	// Record per-server connection health after installServers
+	// commits the new server map, so CachedServers can surface
+	// servers that failed to connect (which never enter m.servers
+	// and would otherwise vanish from the snapshot).
+	m.recordServerHealth(wanted, failedConnects)
 
 	// Close removed and replaced servers outside the lock to
 	// avoid leaking child processes and to avoid blocking
@@ -636,8 +670,10 @@ func (m *Manager) classifyServers(wanted map[string]ServerConfig) (*serverDiff, 
 }
 
 // connectAll runs connectServer in parallel for the given configs.
-// Failed connects are logged and skipped.
-func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []connectedServer {
+// Failed connects are logged and skipped; their server name and
+// error string are returned in the failed map so the caller can
+// record per-server health for the workspace-context snapshot.
+func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) ([]connectedServer, map[string]string) {
 	logger := m.logger.With(agentchat.Fields(ctx)...)
 
 	if hook := m.connectStartedHook; hook != nil {
@@ -647,6 +683,7 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 	var (
 		mu        sync.Mutex
 		connected []connectedServer
+		failed    = make(map[string]string)
 	)
 	var eg errgroup.Group
 	for _, cfg := range toConnect {
@@ -658,6 +695,9 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 					slog.F("transport", cfg.Transport),
 					slog.Error(err),
 				)
+				mu.Lock()
+				failed[cfg.Name] = err.Error()
+				mu.Unlock()
 				return nil // Don't fail the group.
 			}
 			mu.Lock()
@@ -669,7 +709,7 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 		})
 	}
 	_ = eg.Wait()
-	return connected
+	return connected, failed
 }
 
 // installServers builds the new server map from diff.keep and the
@@ -757,6 +797,63 @@ func (m *Manager) CachedTools() []workspacesdk.MCPToolInfo {
 	defer m.mu.RUnlock()
 
 	return slices.Clone(m.tools)
+}
+
+// recordServerHealth rebuilds the per-server health map from the
+// committed server set. A wanted server present in m.servers is
+// connected (a connect that failed but retained a prior working
+// client still counts as connected); one that is absent failed to
+// connect and carries its connect error. Read by CachedServers.
+func (m *Manager) recordServerHealth(wanted map[string]ServerConfig, failedConnects map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// A concurrent Close clears the server set and health; do not
+	// repopulate after that.
+	if m.closed {
+		return
+	}
+
+	health := make(map[string]serverHealthEntry, len(wanted))
+	for name := range wanted {
+		if _, ok := m.servers[name]; ok {
+			health[name] = serverHealthEntry{connected: true}
+			continue
+		}
+		msg := failedConnects[name]
+		if msg == "" {
+			msg = "failed to connect"
+		}
+		health[name] = serverHealthEntry{connected: false, err: msg}
+	}
+	m.serverHealth = health
+}
+
+// CachedServers returns a non-blocking per-server snapshot joining the
+// recorded connection health with the cached tool set. Connected
+// servers carry their current tools; servers that failed to connect
+// carry a non-empty Err and no tools. Like CachedTools it never blocks
+// (no startup-settle wait or reload) and is intended for the
+// agentcontext MCP provider, which runs on every re-resolve.
+func (m *Manager) CachedServers() []ServerStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	byServer := make(map[string][]workspacesdk.MCPToolInfo, len(m.serverHealth))
+	for _, t := range m.tools {
+		byServer[t.ServerName] = append(byServer[t.ServerName], t)
+	}
+
+	out := make([]ServerStatus, 0, len(m.serverHealth))
+	for name, h := range m.serverHealth {
+		out = append(out, ServerStatus{
+			Name:      name,
+			Connected: h.connected,
+			Err:       h.err,
+			Tools:     slices.Clone(byServer[name]),
+		})
+	}
+	return out
 }
 
 // CallTool proxies a tool call to the appropriate MCP server.
@@ -941,6 +1038,9 @@ func (m *Manager) Close() error {
 		}
 	}
 	m.servers = make(map[string]*serverEntry)
+	// Drop recorded health so a closed manager reports no servers
+	// via CachedServers.
+	m.serverHealth = nil
 	// Prevent an in-flight RefreshTools from repopulating tools
 	// after Close clears the cache.
 	m.serverGen++

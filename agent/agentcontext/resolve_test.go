@@ -149,6 +149,57 @@ func TestResolver_MCPConfigEmitted(t *testing.T) {
 	require.Equal(t, uint64(len(contents)), got.SizeBytes)
 }
 
+// TestResolver_MCPConfigValidation confirms that a structurally
+// broken .mcp.json surfaces as StatusInvalid (so the chat context
+// shows it as an issue) while well-formed configs stay StatusOK.
+// The resolver intentionally validates only JSON shape, not
+// individual server fields, which the MCP manager owns.
+func TestResolver_MCPConfigValidation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		contents string
+		wantOK   bool
+	}{
+		{name: "ValidObjectEntry", contents: `{"mcpServers":{"github":{"command":"gh"}}}`, wantOK: true},
+		{name: "EmptyBraces", contents: `{}`, wantOK: true},
+		{name: "EmptyServers", contents: `{"mcpServers":{}}`, wantOK: true},
+		{name: "UnknownTopLevelKeysIgnored", contents: `{"other":1,"mcpServers":{"a":{"url":"http://x"}}}`, wantOK: true},
+		{name: "TrailingComma", contents: `{"mcpServers":{"a":{"command":"x"},}}`, wantOK: false},
+		{name: "Truncated", contents: `{"mcpServers":`, wantOK: false},
+		{name: "Empty", contents: ``, wantOK: false},
+		{name: "ScalarEntry", contents: `{"mcpServers":{"github":"nope"}}`, wantOK: false},
+		{name: "ArrayEntry", contents: `{"mcpServers":{"github":[]}}`, wantOK: false},
+		{name: "ServersNotObject", contents: `{"mcpServers":[]}`, wantOK: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, ".mcp.json"), tc.contents)
+
+			r := &agentcontext.Resolver{}
+			snap := r.Resolve([]agentcontext.ScanRoot{{Path: dir}})
+			require.Len(t, snap.Resources, 1)
+			got := snap.Resources[0]
+			require.Equal(t, agentcontext.KindMCPConfig, got.Kind)
+			// The hash is populated regardless of validity so a fix is
+			// detectable as a change.
+			require.NotEqual(t, [32]byte{}, got.ContentHash)
+
+			if tc.wantOK {
+				require.Equal(t, agentcontext.StatusOK, got.Status)
+				require.Empty(t, got.Error)
+			} else {
+				require.Equal(t, agentcontext.StatusInvalid, got.Status)
+				require.NotEmpty(t, got.Error, "invalid config must carry an error message")
+			}
+		})
+	}
+}
+
 // TestResolver_SymlinkInsideScanRootAllowed exercises the
 // monorepo case where AGENTS.md is symlinked to shared content
 // inside the same workspace tree. The target lives under the
