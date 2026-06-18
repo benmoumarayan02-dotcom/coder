@@ -341,6 +341,7 @@ func bedrockConfigFromRow(row database.AIProvider, settings codersdk.AIProviderS
 	}
 	accessKey := ptr.NilToEmpty(bedrockSettings.AccessKey)
 	accessKeySecret := ptr.NilToEmpty(bedrockSettings.AccessKeySecret)
+	externalID := ptr.NilToEmpty(bedrockSettings.ExternalID)
 	return &aibridge.AWSBedrockConfig{
 		BaseURL:         row.BaseUrl,
 		Region:          bedrockSettings.Region,
@@ -348,6 +349,9 @@ func bedrockConfigFromRow(row database.AIProvider, settings codersdk.AIProviderS
 		AccessKeySecret: accessKeySecret,
 		Model:           bedrockSettings.Model,
 		SmallFastModel:  bedrockSettings.SmallFastModel,
+		RoleARN:         bedrockSettings.RoleARN,
+		ExternalID:      externalID,
+		SessionName:     bedrockSettings.SessionName,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -35,6 +36,11 @@ var _ Provider = &Anthropic{}
 type Anthropic struct {
 	cfg        config.Anthropic
 	bedrockCfg *config.AWSBedrock
+	// bedrockCredCache memoizes the AWS credentials provider (including any
+	// assumed role) so it is built once and reused across requests rather than
+	// re-resolved per interception. nil when this provider is not
+	// Bedrock-backed.
+	bedrockCredCache *bedrockCredentialCache
 }
 
 const routeMessages = "/v1/messages" // https://docs.anthropic.com/en/api/messages
@@ -81,9 +87,15 @@ func NewAnthropic(cfg config.Anthropic, bedrockCfg *config.AWSBedrock) *Anthropi
 		cfg.CircuitBreaker.OpenErrorResponse = anthropicOpenErrorResponse
 	}
 
+	var bedrockCredCache *bedrockCredentialCache
+	if bedrockCfg != nil {
+		bedrockCredCache = newBedrockCredentialCache(*bedrockCfg)
+	}
+
 	return &Anthropic{
-		cfg:        cfg,
-		bedrockCfg: bedrockCfg,
+		cfg:              cfg,
+		bedrockCfg:       bedrockCfg,
+		bedrockCredCache: bedrockCredCache,
 	}
 }
 
@@ -176,11 +188,23 @@ func (p *Anthropic) CreateInterceptor(_ http.ResponseWriter, r *http.Request, tr
 	// end-of-interception.
 	cred := intercept.NewCredentialInfo(credKind, credSecret)
 
+	// Resolve the (cached) AWS credentials provider once per provider. When a
+	// target role is configured this performs the AssumeRole on first use; the
+	// cache then serves and rotates the temporary credentials for subsequent
+	// requests.
+	var bedrockCreds aws.CredentialsProvider
+	if p.bedrockCredCache != nil {
+		bedrockCreds, err = p.bedrockCredCache.get(r.Context())
+		if err != nil {
+			return nil, xerrors.Errorf("resolve bedrock credentials: %w", err)
+		}
+	}
+
 	var interceptor intercept.Interceptor
 	if reqPayload.Stream() {
-		interceptor = messages.NewStreamingInterceptor(id, reqPayload, p.Name(), cfg, p.bedrockCfg, r.Header, authHeaderName, tracer, cred)
+		interceptor = messages.NewStreamingInterceptor(id, reqPayload, p.Name(), cfg, p.bedrockCfg, bedrockCreds, r.Header, authHeaderName, tracer, cred)
 	} else {
-		interceptor = messages.NewBlockingInterceptor(id, reqPayload, p.Name(), cfg, p.bedrockCfg, r.Header, authHeaderName, tracer, cred)
+		interceptor = messages.NewBlockingInterceptor(id, reqPayload, p.Name(), cfg, p.bedrockCfg, bedrockCreds, r.Header, authHeaderName, tracer, cred)
 	}
 	span.SetAttributes(interceptor.TraceAttributes(r)...)
 	return interceptor, nil
