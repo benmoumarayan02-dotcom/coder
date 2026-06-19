@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD041 -->
+<!-- markdownlint-disable MD041 -->elif👷‍♀️1
 <div align="center">
   <a href="https://coder.com#gh-light-mode-only">
     <img src="./docs/images/logo-black.png" alt="Coder Logo Light" style="width: 128px">
